@@ -1076,8 +1076,46 @@ class MainWindow(QtWidgets.QWidget):
         if file_path:
             self.start_thread(file_path)
 
+    def _enumerate_cameras(self, max_index=8):
+        """枚举可用摄像头（含 OBS 等虚拟摄像头），返回 [(索引, 名称), ...]"""
+        cameras = []
+        for i in range(max_index):
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            name = f"摄像头 {i} ({w}x{h})" if w > 0 and h > 0 else f"摄像头 {i}"
+            cameras.append((i, name))
+        return cameras
+
     def open_camera(self):
-        self.start_thread(0)
+        # 先停止当前线程，释放摄像头资源，确保设备枚举完整
+        if self.thread is not None:
+            self.thread.stop()
+            self.thread = None
+
+        cameras = self._enumerate_cameras()
+        if not cameras:
+            QtWidgets.QMessageBox.warning(self, "未找到摄像头", "未检测到可用摄像头（含虚拟摄像头）。\n请确认设备已接入并被系统识别。")
+            return
+
+        if len(cameras) == 1:
+            index = cameras[0][0]
+        else:
+            labels = [name for _, name in cameras]
+            selected, ok = QtWidgets.QInputDialog.getItem(
+                self, "选择摄像头", "请选择要接入的摄像头（含虚拟摄像头）：",
+                labels, 0, False,
+            )
+            if not ok:
+                return
+            index = cameras[labels.index(selected)][0]
+
+        self.append_system_log(f"正在接入摄像头 {index} ...")
+        self.start_thread(index)
 
     def stop_camera(self):
         if self.thread is not None:
@@ -1284,7 +1322,7 @@ class MainWindow(QtWidgets.QWidget):
         self.append_system_log("视角已重置")
         if self.thread:
             self.thread.perspective_locked = False
-            self.thread.current_perspective = "分析中..."
+            self.thread.current_perspective = "前向视角"
             
     def toggle_debug_mode(self, checked):
         if self.thread:

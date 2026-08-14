@@ -107,7 +107,7 @@ class VideoThread(QtCore.QThread):
         self._forward_lock_count = 0
         self._locked_warning_y = None
         self.perspective_locked = False
-        self.current_perspective = "分析中..."
+        self.current_perspective = "前向视角"
 
         # ---------- 中文字体路径设置 ----------
 
@@ -424,7 +424,11 @@ class VideoThread(QtCore.QThread):
     def run(self):
 
         self.status_signal.emit("扫描中")
-        self.cap = cv2.VideoCapture(self.source)
+        if isinstance(self.source, int):
+            # 摄像头（含虚拟摄像头）使用 DirectShow 后端，兼容 OBS Virtual Camera 等
+            self.cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(self.source)
         if not self.cap.isOpened():
             self.status_signal.emit("系统就绪")
             return
@@ -453,14 +457,12 @@ class VideoThread(QtCore.QThread):
             model = ultralytics.YOLO(self.model_path)
 
         self.model_signal.emit(os.path.basename(self.model_path))
-        allowed_names = {"person", "car", "truck", "bus", "motorcycle", "bicycle"}
 
         name_map = model.names if isinstance(model.names, dict) else {i: n for i, n in enumerate(model.names)}
-        allowed_ids = {k for k, v in name_map.items() if v in allowed_names}
         fps_value = self.fps
 
-        # 检查 GPU 是否可用并指定设备
-        device = '0' if torch.cuda.is_available() else 'cpu'
+        # 强制使用 CPU 推理（RTX 50 系 sm_120 与 cu126 版 PyTorch 不兼容，避免 CUDA kernel 缺失崩溃）
+        device = 'cpu'
 
         # 缓存上一帧的追踪结果
         last_results = None
@@ -638,7 +640,6 @@ class VideoThread(QtCore.QThread):
                     imgsz=640,          # 进一步降低分辨率以提升速度 (640 是 YOLO 标准值)
                     conf=0.25,
                     iou=0.5,
-                    classes=[0, 1, 2, 3, 5, 7],
                     tracker="bytetrack.yaml",
                     device=device       # 明确使用 GPU
                 )
@@ -657,8 +658,6 @@ class VideoThread(QtCore.QThread):
                 if boxes is not None and len(boxes) > 0:
                     for box in boxes:
                         cls_id = int(box.cls[0]) if box.cls is not None else -1
-                        if cls_id not in allowed_ids:
-                            continue
 
                         track_id = int(box.id[0]) if box.id is not None else -1
                         conf_score = float(box.conf[0]) if box.conf is not None else 0.0
@@ -668,8 +667,6 @@ class VideoThread(QtCore.QThread):
                             continue
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                         class_name = name_map.get(cls_id, "")
-                        if class_name in {"car", "truck"} and conf_score < 0.45:
-                            continue
 
                         # Sobel 边缘强度辅助过滤：降低低置信度静态纹理误报
                         edge_strength = 0.0

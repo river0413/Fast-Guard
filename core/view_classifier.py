@@ -19,6 +19,9 @@ import collections
 class ViewClassifier:
     """视角分类器：具备连续反馈和多维时延感知的判决状态机"""
 
+    # 写死视角开关：设为 "前向视角" / "侧面视角" 则固定视角；设为 None 恢复自动判断
+    FORCE_PERSPECTIVE = "前向视角"
+
     def __init__(self, log_dir: str = None,
                  edge_flow_weight: float = 1.2, center_flow_weight: float = 0.6,
                  side_evidence_base: float = 0.4, flow_side_factor: float = 0.6,
@@ -59,7 +62,7 @@ class ViewClassifier:
 
     def reset(self):
         self.frame_count = 0
-        self.current_view = "分析中..."
+        self.current_view = self.FORCE_PERSPECTIVE if self.FORCE_PERSPECTIVE else "分析中..."
 
         self.prev_left_roi = None
         self.prev_right_roi = None
@@ -328,6 +331,12 @@ class ViewClassifier:
         self.side_lock_counter = self._side_confirm_count + self._front_return_count
 
     def analyze_frame(self, frame, detections=None):
+        if self.FORCE_PERSPECTIVE:
+            fw = 0.95 if self.FORCE_PERSPECTIVE == "前向视角" else 0.05
+            sw = 0.95 if self.FORCE_PERSPECTIVE == "侧面视角" else 0.05
+            self.current_view = self.FORCE_PERSPECTIVE
+            return fw, sw
+
         if self.locked:
             fw = 0.95 if self.locked_perspective == "前向视角" else 0.05
             sw = 0.95 if self.locked_perspective == "侧面视角" else 0.05
@@ -378,6 +387,8 @@ class ViewClassifier:
         return self.current_forward_score / total, self.current_side_score / total
 
     def determine_perspective(self):
+        if self.FORCE_PERSPECTIVE:
+            return self.FORCE_PERSPECTIVE
         if self.locked:
             return self.locked_perspective
         return self.current_view
