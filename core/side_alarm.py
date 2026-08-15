@@ -61,26 +61,29 @@ class SideAlarm:
         """
         self._current_perspective = perspective
 
-    def check_debounce(self, track_id: int, raw_risk: int) -> int:
+    def check_debounce(self, track_id: int, raw_risk: int, quality: float = 1.0) -> int:
         """
-        去抖动：连续 confirm_frames 帧满足触发条件才真正输出报警。
+        去抖动：连续 confirm_frames 帧满足触发条件才真正输出报警（质量感知）。
 
         Args:
             track_id: 跟踪 ID
             raw_risk: 当前帧原始风险等级（0/1/2）
+            quality: 航迹质量评分（越高越灵敏，所需确认帧数越少）
 
         Returns:
             去抖后的风险等级
         """
+        quality = max(0.2, min(1.5, float(quality)))
+        eff_confirm = max(1, int(round(self._confirm_frames / quality)))
         self._debounce_frame_counter += 1
         self._debounce_last_seen[track_id] = self._debounce_frame_counter
         if raw_risk >= 2:
-            self._alarm_counters[track_id] = self._confirm_frames
+            self._alarm_counters[track_id] = eff_confirm
             return raw_risk
         if raw_risk > 0:
             cnt = self._alarm_counters.get(track_id, 0) + 1
             self._alarm_counters[track_id] = cnt
-            return raw_risk if cnt >= self._confirm_frames else 0
+            return raw_risk if cnt >= eff_confirm else 0
         self._alarm_counters.pop(track_id, None)
         return 0
 
