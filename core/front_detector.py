@@ -80,6 +80,7 @@ class FrontCollisionDetector:
         t_reaction: float = 1.2,
         d_safe: float = 2.0,
         ipm: Optional[object] = None,
+        tws_vy: Optional[float] = None,
     ) -> Tuple[float, float, float, float, bool, float, bool, int, bool]:
         """
         更新目标状态并计算正面碰撞风险
@@ -202,7 +203,9 @@ class FrontCollisionDetector:
         # 距离兜底（当提供距离且有接近速度时）
         provided_distance = None if distance is None else float(distance)
         if provided_distance is not None and len(xs) >= 2:
-            vy_world = (ys[-1] - ys[-2]) * self.fps - float(global_vy)
+            # 优先使用 TWS 卡尔曼平滑的纵向速度，其次用相邻帧中心差分
+            vy_src = float(tws_vy) if tws_vy is not None else (ys[-1] - ys[-2]) * self.fps
+            vy_world = vy_src - float(global_vy)
             if vy_world < -1e-3:  # 向前移动（靠近相机）
                 ttc_by_dist = abs(provided_distance / vy_world)
                 if ttc_by_dist > 0:

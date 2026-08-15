@@ -638,7 +638,7 @@ class VideoThread(QtCore.QThread):
                     persist=True,
                     verbose=False,
                     imgsz=640,          # 进一步降低分辨率以提升速度 (640 是 YOLO 标准值)
-                    conf=0.25,
+                    conf=0.1,
                     iou=0.5,
                     tracker="bytetrack.yaml",
                     device=device       # 明确使用 GPU

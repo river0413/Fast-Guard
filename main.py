@@ -47,6 +47,9 @@ from core.view_classifier import ViewClassifier
 from core.side_alarm import SideAlarm
 from core.front_alarm import FrontAlarm
 from core.alarm import CollisionAlarm
+from core.tws import TWSManager
+from core.ego_motion import EgoMotionDetector
+from core.stopped_sentinel import StoppedSentinel
 
 from auth.db import UserDB, LogDB
 from auth.ui import LoginDialog
@@ -185,6 +188,7 @@ class VideoThread(QtCore.QThread):
     debug_signal = QtCore.pyqtSignal(dict)
     position_signal = QtCore.pyqtSignal(int, int, float, float)
     hud_signal = QtCore.pyqtSignal(dict)
+    sentinel_signal = QtCore.pyqtSignal(str, str)
 
 
 
@@ -259,6 +263,24 @@ class VideoThread(QtCore.QThread):
         # ---- view_classifier 连续置信度缓存（每帧更新） ----
         self._vc_fw_score: float = 0.5
         self._vc_sw_score: float = 0.5
+
+        # ---- TWS 目标记忆系统 / 停止哨兵 ----
+        self.tws = None                 # 在 run() 中按 fps 初始化
+        self._tws_meta = {}             # stable_id -> TrackOutput
+        self._last_sobel_magnitude = None
+        # 分块预处理/推理缓存（上方每3帧1次，下方每3帧2次）
+        self._clahe = None
+        self._upper_enhanced = None
+        self._lower_enhanced = None
+        self._upper_gray = None
+        self._lower_gray = None
+        self._upper_sobel = None
+        self._lower_sobel = None
+        self._upper_results = None
+        self._lower_results = None
+        self.ego_motion = EgoMotionDetector()
+        self.sentinel = StoppedSentinel()
+        self._last_sentinel_level = "safe"
         
         # ---------- 中文字体路径设置 ----------
 
@@ -571,6 +593,100 @@ class VideoThread(QtCore.QThread):
             pass
         return frame
 
+    # --- 分块预处理/推理辅助方法 ---
+    def _enhance_region(self, region_bgr):
+        """对区域做 CLAHE 增强 + Sobel，返回 (enhanced_bgr, gray_l, sobel_magnitude)"""
+        denoised = cv2.medianBlur(region_bgr, 3)
+        lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        if self._clahe is None:
+            self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_eq = self._clahe.apply(l)
+        enhanced = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
+        gx = cv2.Sobel(l_eq, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(l_eq, cv2.CV_64F, 0, 1, ksize=3)
+        sobel = cv2.magnitude(gx, gy)
+        return enhanced, l_eq, sobel
+
+    def _parse_boxes(self, results, y_offset, h_block, w_block, sobel_block, detect_line_y, name_map):
+        """解析单块 YOLO 结果，坐标加 y_offset 偏移，返回 raw_dets 列表"""
+        raw = []
+        if not results:
+            return raw
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return raw
+        for box in boxes:
+            cls_id = int(box.cls[0]) if box.cls is not None else -1
+            conf_score = float(box.conf[0]) if box.conf is not None else 0.0
+            xyxy = box.xyxy[0].cpu().numpy().astype(int)
+            x1, y1, x2, y2 = xyxy
+            y1 += y_offset
+            y2 += y_offset
+            # 只在前向视角下使用检测线过滤
+            if self.current_perspective == "前向视角" and y2 <= detect_line_y:
+                continue
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
+            class_name = name_map.get(cls_id, "")
+
+            # Sobel 边缘强度辅助过滤：降低低置信度静态纹理误报
+            edge_strength = 0.0
+            if sobel_block is not None:
+                roi_y1 = max(0, y1 - y_offset)
+                roi_y2 = min(h_block, y2 - y_offset)
+                roi_x1 = max(0, x1)
+                roi_x2 = min(w_block, x2)
+                if roi_y2 > roi_y1 and roi_x2 > roi_x1:
+                    try:
+                        roi_edge = sobel_block[roi_y1:roi_y2, roi_x1:roi_x2]
+                        if roi_edge.size > 0:
+                            edge_strength = float(np.mean(roi_edge))
+                    except Exception:
+                        pass
+
+            if class_name in {"bicycle", "motorcycle", "person"}:
+                if conf_score < 0.10:
+                    continue
+                if conf_score < self.weak_conf_threshold and edge_strength < self.edge_strength_threshold:
+                    continue
+
+            raw.append((-1, class_name, x1, y1, x2, y2, conf_score, cx, cy))
+        return raw
+
+    def _nms_raw_dets(self, raw_dets, iou_thresh=0.5):
+        """按类别做 IoU NMS，去除重叠区跨块重复检测"""
+        if len(raw_dets) <= 1:
+            return raw_dets
+        dets = sorted(raw_dets, key=lambda d: d[6], reverse=True)
+        keep = []
+        while dets:
+            best = dets[0]
+            keep.append(best)
+            bx1, by1, bx2, by2 = best[2], best[3], best[4], best[5]
+            bcls = best[1]
+            rest = []
+            for d in dets[1:]:
+                if d[1] == bcls:
+                    iou = self._box_iou((bx1, by1, bx2, by2), (d[2], d[3], d[4], d[5]))
+                    if iou > iou_thresh:
+                        continue
+                rest.append(d)
+            dets = rest
+        return keep
+
+    @staticmethod
+    def _box_iou(a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        inter = (ix2 - ix1) * (iy2 - iy1)
+        union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+        return inter / max(union, 1e-6)
+
     # --- 核心主循环 ---
     def run(self):
 
@@ -590,9 +706,11 @@ class VideoThread(QtCore.QThread):
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.duration = self.total_frames / self.fps if self.total_frames > 0 else 0.0
 
-        # 初始化碰撞检测器
+        # 初始化碰撞检测器与 TWS 航迹管理器
         self.front_detector = FrontCollisionDetector(self.fps)
         self.side_detector = SideCollisionDetector(self.fps)
+        self.tws = TWSManager(self.fps)
+        self._tws_meta = {}
 
         if not os.path.exists(self.model_path):
             model_filename = os.path.basename(self.model_path)
@@ -670,6 +788,11 @@ class VideoThread(QtCore.QThread):
                 self.ipm.set_frame(w, h)
             # 保留原始帧用于 UI 渲染（避免过度增强）
             frame_raw = frame.copy()
+            # 帧序号提前更新，保证预处理/推理使用一致的 _frame_count
+            current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+            if current_frame_idx < 0:
+                current_frame_idx = self._frame_count
+            self._frame_count = current_frame_idx
 
 
             # --- 优化后的图像预处理 ---
@@ -677,27 +800,25 @@ class VideoThread(QtCore.QThread):
             # 默认只进行最小限度的增强用于推理
             
             # 推理用的轻量级增强
-            inference_frame = frame
             pre_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # 基础灰度用于后续逻辑
+            base_gray = pre_gray  # 原始灰度，供 ego-motion 与停止哨兵使用（避免 CLAHE 替换引入跳变）
 
-            # 如果需要更强的特征（原有的 CLAHE 和 掩码），可以保留但优化
-            # 比如：每 2 帧计算一次掩码，或者跳过 Sobel
-            do_heavy_preproc = (self._frame_count % 3 == 0) # 降低重度预处理频率
-            
-            if do_heavy_preproc:
-                denoised_frame = cv2.medianBlur(frame, 3)
-                lab = cv2.cvtColor(denoised_frame, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                l_eq = clahe.apply(l)
-                enhanced_frame = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
-                pre_gray = l_eq # 更新显示用的灰度图
-            else:
-                enhanced_frame = frame
+            # ---- 分块预处理：上方每3帧处理1次，下方每3帧处理2次 ----
+            # 上方块 [0, 2/3h]，下方块 [1/3h, h]，中间 1/3 重叠（重叠区取下方更新鲜结果）
+            _upper_end = int(h * 2 / 3)
+            _lower_start = int(h * 1 / 3)
+            if self._frame_count % 3 == 0 or self._upper_enhanced is None:
+                self._upper_enhanced, self._upper_gray, self._upper_sobel = self._enhance_region(frame[0:_upper_end])
+            if self._frame_count % 3 != 2 or self._lower_enhanced is None:
+                self._lower_enhanced, self._lower_gray, self._lower_sobel = self._enhance_region(frame[_lower_start:h])
 
-            # 简化掩码和推理帧生成 (核心卡顿点)
+            _keep_h = _upper_end - _lower_start  # 1/3h，上方块实际保留的高度
+            enhanced_frame = np.vstack([self._upper_enhanced[0:_keep_h], self._lower_enhanced])
+            pre_gray = np.vstack([self._upper_gray[0:_keep_h], self._lower_gray])
+            sobel_magnitude = np.vstack([self._upper_sobel[0:_keep_h], self._lower_sobel])
+
+            # 推理帧（增强后的完整帧）
             inference_frame = enhanced_frame
-            sobel_magnitude = np.zeros_like(pre_gray) # 默认空，按需计算
 
             # --- 双目 SBS 自动识别与分割 ---
 
@@ -736,10 +857,6 @@ class VideoThread(QtCore.QThread):
             else:
                 self.stereo_mode = False
                 self.disparity_map = None
-            current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-            if current_frame_idx < 0:
-                current_frame_idx = self._frame_count
-            self._frame_count = current_frame_idx
 
             if self._seeking:
                 rgb_preview = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -786,22 +903,50 @@ class VideoThread(QtCore.QThread):
                 # 侧面视角：使用side_alarm模块绘制警示线
                 frame = self.side_alarm.draw_warning_lines(frame, h, w)
 
-
-            # 统一跳帧逻辑：每 FRAME_STRIDE 帧进行一次推理
-            if self._frame_count % self.FRAME_STRIDE == 0:
-                results = model.track(
-                    inference_frame,
-                    persist=True,
-                    verbose=False,
-                    imgsz=640,          # 进一步降低分辨率以提升速度 (640 是 YOLO 标准值)
-                    conf=0.25,
-                    iou=0.5,
-                    tracker="bytetrack.yaml",
-                    device=device       # 明确使用 GPU
-                )
-                last_results = results
+            # === 停止哨兵：本车静止时监控安全区像素运动 ===
+            self.ego_motion.update(base_gray)
+            if self.ego_motion.is_stopped:
+                _sw_line_x = warning_line_x if self.current_perspective == "侧面视角" else None
+                _camera_side = self.side_alarm.camera_side if self.side_alarm else "left"
+                sentinel_level, _sentinel_ratio = self.sentinel.update(
+                    base_gray, self.current_perspective, h, w,
+                    warning_line_y, _sw_line_x, _camera_side)
+                if sentinel_level != self._last_sentinel_level:
+                    if sentinel_level == "alarm":
+                        self.sentinel_signal.emit("alarm", "静止哨兵：安全区检测到显著运动")
+                    elif sentinel_level == "hint":
+                        self.sentinel_signal.emit("hint", "静止哨兵：安全区检测到轻微运动")
+                    self._last_sentinel_level = sentinel_level
             else:
-                results = last_results
+                self.sentinel.reset()
+
+
+            # ---- 推理：单目分块（上方3帧1次/下方3帧2次）；SBS 双目整帧 ----
+            if self.stereo_mode:
+                if self._frame_count % self.FRAME_STRIDE == 0:
+                    results = model.track(
+                        inference_frame,
+                        persist=True,
+                        verbose=False,
+                        imgsz=640,
+                        conf=0.10,
+                        iou=0.5,
+                        tracker="bytetrack.yaml",
+                        device=device
+                    )
+                    last_results = results
+                else:
+                    results = last_results
+            else:
+                if self._frame_count % 3 == 0 or self._upper_results is None:
+                    self._upper_results = model.predict(
+                        self._upper_enhanced, verbose=False,
+                        imgsz=640, conf=0.10, iou=0.5, device=device)
+                if self._frame_count % 3 != 2 or self._lower_results is None:
+                    self._lower_results = model.predict(
+                        self._lower_enhanced, verbose=False,
+                        imgsz=640, conf=0.10, iou=0.5, device=device)
+                results = None  # 非 SBS 路径不再使用 results
 
             infos = []
             persons = []
@@ -809,48 +954,33 @@ class VideoThread(QtCore.QThread):
             dx_list = []
             dy_list = []
             bev_data = [] # 记录投影点
-            if results:
-                boxes = results[0].boxes
-                if boxes is not None and len(boxes) > 0:
-                    for box in boxes:
-                        cls_id = int(box.cls[0]) if box.cls is not None else -1
 
-                        track_id = int(box.id[0]) if box.id is not None else -1
-                        conf_score = float(box.conf[0]) if box.conf is not None else 0.0
-                        xyxy = box.xyxy[0].cpu().numpy().astype(int)
-                        x1, y1, x2, y2 = xyxy
-                        # 只在前向视角下使用检测线过滤
-                        if self.current_perspective == "前向视角" and y2 <= detect_line_y:
-                            continue
-                        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                        class_name = name_map.get(cls_id, "")
+            # ---- 解析 YOLO 输出为 raw detections（含块坐标偏移与重叠区 NMS） ----
+            raw_dets = []
+            if self.stereo_mode:
+                raw_dets = self._parse_boxes(results, 0, h, w, sobel_magnitude, detect_line_y, name_map)
+            else:
+                _upper_end = int(h * 2 / 3)
+                _lower_start = int(h * 1 / 3)
+                raw_dets += self._parse_boxes(self._upper_results, 0, _upper_end, w, self._upper_sobel, detect_line_y, name_map)
+                raw_dets += self._parse_boxes(self._lower_results, _lower_start, h - _lower_start, w, self._lower_sobel, detect_line_y, name_map)
+                raw_dets = self._nms_raw_dets(raw_dets)
 
-                        # Sobel 边缘强度辅助过滤：降低低置信度静态纹理误报
-                        edge_strength = 0.0
-                        roi_y1, roi_y2 = max(0, y1), min(h, y2)
-                        roi_x1, roi_x2 = max(0, x1), min(w, x2)
-                        if roi_y2 > roi_y1 and roi_x2 > roi_x1:
-                            roi_edge = sobel_magnitude[roi_y1:roi_y2, roi_x1:roi_x2]
-                            if roi_edge.size > 0:
-                                edge_strength = float(np.mean(roi_edge))
+            # ---- TWS 稳定化：stable_id + 卡尔曼外推 + 跨 ID 关联 ----
+            tws_out = self.tws.update(raw_dets, current_frame_idx)
+            self._tws_meta = {o.stable_id: o for o in tws_out}
+            for o in tws_out:
+                record = (o.stable_id, o.x1, o.y1, o.x2, o.y2, o.cx, o.cy, o.class_name)
+                infos.append(record)
+                if o.class_name in {"bicycle", "motorcycle"}:
+                    bikes.append(record)
+                if o.class_name == "person":
+                    persons.append(record)
 
-                        if class_name in {"bicycle", "motorcycle", "person"}:
-                            if conf_score < 0.25:
-                                continue
-                            if conf_score < self.weak_conf_threshold and edge_strength < self.edge_strength_threshold:
-                                continue
-
-                        record = (track_id, x1, y1, x2, y2, cx, cy, class_name)
-                        infos.append(record)
-                        if class_name in {"bicycle", "motorcycle"}:
-                            bikes.append(record)
-                        if class_name == "person":
-                            persons.append(record)
-
-                        if track_id in self._last_centers:
-                            px, py = self._last_centers[track_id]
-                            dx_list.append(cx - px)
-                            dy_list.append(cy - py)
+                if not o.is_coasting and o.stable_id in self._last_centers:
+                    px, py = self._last_centers[o.stable_id]
+                    dx_list.append(o.cx - px)
+                    dy_list.append(o.cy - py)
 
             def iou(a, b):
                 ax1, ay1, ax2, ay2 = a[1], a[2], a[3], a[4]
@@ -1148,7 +1278,8 @@ class VideoThread(QtCore.QThread):
                     # 按类别设置面积阈值：行人/非机动车目标较小，降低阈值提升召回
                     _min_ar = 0.005 if class_name in {"person", "bicycle", "motorcycle"} else 0.015
 
-                    # 使用正面碰撞检测器
+                    # 使用正面碰撞检测器（传入 TWS 平滑纵向速度做 TTC 融合）
+                    _tws_vy = self._tws_meta[track_id].vy if track_id in self._tws_meta else None
                     ttc, vx, vy, dw_dt, red_allowed, vw, is_static, risk_level, in_path = self.front_detector.update(
                         track_id,
                         width,
@@ -1168,6 +1299,7 @@ class VideoThread(QtCore.QThread):
                         t_reaction=self.t_reaction,
                         d_safe=self.d_safe,
                         ipm=self.current_ipm,
+                        tws_vy=_tws_vy,
                     )
 
                 v_rel = None
@@ -1221,9 +1353,16 @@ class VideoThread(QtCore.QThread):
                 if angle_cost > 0.25 and risk_level > 0:
                     risk_level = max(0, risk_level - 1)
                 
+                # 航迹元数据（TWS 输出）
+                _meta = self._tws_meta.get(track_id)
+
+                # coasting（外推）目标风险降级，抑制失跟期间的误报
+                if _meta and _meta.is_coasting:
+                    risk_level = max(0, risk_level - 1)
+
                 # 只在前向视角下使用过滤逻辑，侧面视角不过滤
                 if self.current_perspective == "前向视角":
-                    if self._seen_counts.get(track_id, 0) < 5:
+                    if _meta is None or _meta.state == "tentative":
                         continue
                     if is_static:
                         continue
@@ -1253,11 +1392,12 @@ class VideoThread(QtCore.QThread):
                     min_ttc = warn_ttc
                     min_id = track_id
 
-                # 去抖动：连续帧确认后才真正输出报警颜色
+                # 去抖动：连续帧确认后才真正输出报警颜色（质量感知）
+                _quality = _meta.quality if _meta else 1.0
                 if self.current_perspective == "前向视角":
-                    risk_level = self.front_alarm.check_debounce(track_id, risk_level)
+                    risk_level = self.front_alarm.check_debounce(track_id, risk_level, quality=_quality)
                 else:
-                    risk_level = self.side_alarm.check_debounce(track_id, risk_level)
+                    risk_level = self.side_alarm.check_debounce(track_id, risk_level, quality=_quality)
 
                 # 根据视角获取显示参数
                 if self.current_perspective == "前向视角":
@@ -1312,10 +1452,13 @@ class VideoThread(QtCore.QThread):
             alarm_threshold = 2.0 if self.current_perspective == "侧面视角" else 2.5
             # 取当前视角下最高风险等级用于调试面板显示
             _panel_risk = 2 if min_ttc < alarm_threshold else (1 if min_ttc < alarm_threshold + 1.0 else 0)
-            if min_ttc < alarm_threshold:
+            # 停止哨兵 alarm 与 TTC 报警共用音频，统一在此裁决
+            _sentinel_alarm = (self.sentinel.last_level == "alarm")
+            if min_ttc < alarm_threshold or _sentinel_alarm:
                 if self._frame_count % self.FRAME_STRIDE == 0:
                     cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 255), 8)
-                self.log_signal.emit(min_id, min_ttc)
+                if min_ttc < alarm_threshold:
+                    self.log_signal.emit(min_id, min_ttc)
                 self.audio_alarm.trigger()
             else:
                 self.audio_alarm.cease()
@@ -1357,10 +1500,11 @@ class VideoThread(QtCore.QThread):
             bytes_orig = ch_orig * w_orig
             qimage_orig = QtGui.QImage(rgb_orig.data, w_orig, h_orig, bytes_orig, QtGui.QImage.Format_RGB888)
 
-            # 2. Pre-processed View
-            h_pre, w_pre = pre_gray.shape[:2]
-            bytes_pre = w_pre
-            qimage_pre = QtGui.QImage(pre_gray.data, w_pre, h_pre, bytes_pre, QtGui.QImage.Format_Grayscale8)
+            # 2. Pre-processed View（显示分块增强后的彩色帧）
+            rgb_pre = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2RGB)
+            h_pre, w_pre, ch_pre = rgb_pre.shape
+            bytes_pre = ch_pre * w_pre
+            qimage_pre = QtGui.QImage(rgb_pre.data, w_pre, h_pre, bytes_pre, QtGui.QImage.Format_RGB888)
 
             # 3. Inference View (Final frame)
             rgb_inf = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -2777,6 +2921,7 @@ class MainWindow(QtWidgets.QWidget):
         self.thread.debug_signal.connect(self.update_debug_info)
         self.thread.position_signal.connect(self.update_position)
         self.thread.hud_signal.connect(self.update_hud)
+        self.thread.sentinel_signal.connect(self.update_sentinel)
         self.thread.start()
         
         self.card_risk.update_value("扫描中", "初始化...")
@@ -2970,6 +3115,23 @@ class MainWindow(QtWidgets.QWidget):
         
         self.card_fps.update_value(f"{fps:.1f}", "赫兹")
         self.card_objects.update_value(str(tracked), "个")
+
+    def update_sentinel(self, level, message):
+        timestamp = time.strftime("%H:%M:%S")
+        if level == "alarm":
+            prefix = "🚨 "
+            self.log_db.add_log(self.current_user, "danger", message, "sentinel")
+            self.card_risk.update_value("静止哨兵", message)
+            self.card_risk.setStyleSheet("""
+                QFrame#statCard { background: #450a0a; border: 1px solid #dc2626; border-radius: 16px; }
+                QLabel {background: transparent;}
+            """)
+        else:
+            prefix = "⚠️ "
+            self.log_db.add_log(self.current_user, "warning", message, "sentinel")
+        log_msg = f"{prefix} [{timestamp}] {message}"
+        self.log_window.add_log_entry(log_msg)
+        self.append_to_log_viewer(log_msg)
 
     def update_frame(self, img_orig, img_pre, img_inf, img_bev):
         self.last_images = (img_orig, img_pre, img_inf, img_bev)
