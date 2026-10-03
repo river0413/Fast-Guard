@@ -1,99 +1,56 @@
+"""本地存储：运行日志库。
+
+本地账号体系已移除，登录与注册统一由云端账户系统处理（见 auth/cloud.py），
+本模块只负责本地运行日志的读写。
+"""
+
 import os
-import time
 import sqlite3
-import hashlib
+import time
+
+DB_NAME = "fastguard.db"
+LEGACY_DB_NAME = "users.db"
 
 
-class UserDB:
-    def __init__(self, db_path=None):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(base_dir, "data")
-        os.makedirs(data_dir, exist_ok=True)
-        self.db_path = db_path or os.path.join(data_dir, "users.db")
-        self._init_db()
-
-    def _hash_password(self, password: str) -> str:
-        salt = "FastGuard@2026"
-        return hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
-
-    def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.commit()
-        self.ensure_admin()
-
-    def ensure_admin(self):
-        admin_user = "admin"
-        admin_pass = "Admin123"
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT username FROM users WHERE username=?", (admin_user,))
-            if cur.fetchone() is None:
-                cur.execute(
-                    "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-                    (admin_user, self._hash_password(admin_pass), "admin", time.strftime("%Y-%m-%d %H:%M:%S"))
-                )
-                conn.commit()
-
-    def verify_user(self, username: str, password: str):
-        pwd_hash = self._hash_password(password)
-        return self.verify_user_hash(username, pwd_hash)
-
-    def verify_user_hash(self, username: str, password_hash: str):
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT role FROM users WHERE username=? AND password_hash=?", (username, password_hash))
-            row = cur.fetchone()
-            return row[0] if row else None
+def _checkpoint_wal(db_path: str):
+    """把 WAL 中未落盘的内容合并回主库文件，避免迁移时丢日志。"""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        pass
 
 
-    def user_exists(self, username: str) -> bool:
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM users WHERE username=?", (username,))
-            return cur.fetchone() is not None
+def _migrate_legacy_db(db_path: str):
+    """旧版本把本地账号与日志放在同一个 users.db，这里迁移为新的日志库文件名。"""
+    legacy_path = os.path.join(os.path.dirname(db_path), LEGACY_DB_NAME)
+    if os.path.exists(legacy_path) and not os.path.exists(db_path):
+        _checkpoint_wal(legacy_path)
+        try:
+            os.replace(legacy_path, db_path)
+        except OSError:
+            return
+    for suffix in ("-wal", "-shm"):
+        sidecar = legacy_path + suffix
+        if os.path.exists(sidecar):
+            try:
+                os.remove(sidecar)
+            except OSError:
+                pass
 
-    def create_user(self, username: str, password: str, role: str = "user") -> bool:
-        if self.user_exists(username):
-            return False
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-                (username, self._hash_password(password), role, time.strftime("%Y-%m-%d %H:%M:%S"))
-            )
-            conn.commit()
-        return True
 
-    def list_users(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT username, role, created_at FROM users ORDER BY created_at DESC")
-            return cur.fetchall()
-
-    def delete_user(self, username: str) -> bool:
-        if username == "admin":
-            return False
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM users WHERE username=?", (username,))
-            conn.commit()
-            return cur.rowcount > 0
+def default_db_path() -> str:
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(base_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    db_path = os.path.join(data_dir, DB_NAME)
+    _migrate_legacy_db(db_path)
+    return db_path
 
 
 class LogDB:
-    def __init__(self, db_path):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or default_db_path()
         self._init_db()
 
     def _init_db(self):
@@ -111,6 +68,8 @@ class LogDB:
                 )
                 """
             )
+            # 本地账号表已废弃，随迁移一并清理
+            cur.execute("DROP TABLE IF EXISTS users")
             conn.commit()
 
     def add_log(self, username: str, level: str, message: str, category: str = "system"):
@@ -145,10 +104,3 @@ class LogDB:
             else:
                 cur.execute("DELETE FROM logs")
             conn.commit()
-
-    def delete_logs_for_user(self, username: str):
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM logs WHERE username=?", (username,))
-            conn.commit()
-

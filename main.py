@@ -51,7 +51,8 @@ from core.tws import TWSManager
 from core.ego_motion import EgoMotionDetector
 from core.stopped_sentinel import StoppedSentinel
 
-from auth.db import UserDB, LogDB
+from auth.db import LogDB
+from auth.cloud import CloudAuthClient, OFFLINE_ROLE, OFFLINE_USERNAME
 from auth.ui import LoginDialog
 from auth.admin import AdminPanel
 
@@ -1959,9 +1960,8 @@ class SettingsWindow(QtWidgets.QDialog):
 
     # --- 主窗口核心逻辑 ---
 class MainWindow(QtWidgets.QWidget):
-    def __init__(self, user_db: UserDB, log_db: LogDB, username: str, role: str):
+    def __init__(self, log_db: LogDB, username: str, role: str):
         super().__init__()
-        self.user_db = user_db
         self.log_db = log_db
         self.current_user = username
         self.current_role = role
@@ -1992,7 +1992,7 @@ class MainWindow(QtWidgets.QWidget):
         self.total_duration = 0.0
         self.total_frames = 0
         self.log_window = LogWindow(self.log_db, self.current_user, self.current_role == "admin", self)
-        self.admin_panel = AdminPanel(self.user_db, self.log_db, self) if self.current_role == "admin" else None
+        self.admin_panel = AdminPanel(self.log_db, self) if self.current_role == "admin" else None
 
         self.settings_window = SettingsWindow(self.weak_conf_threshold, self.edge_strength_threshold, self)
         self.settings_window.preprocess_changed.connect(self.update_preprocess_from_dialog)
@@ -3187,12 +3187,12 @@ def main():
     print_versions()
     app = QtWidgets.QApplication(sys.argv)
     
-    user_db = UserDB()
-    log_db = LogDB(user_db.db_path)
+    log_db = LogDB()
+    cloud_auth = CloudAuthClient()
     
     def show_login_dialog():
         """显示登录对话框并返回登录结果"""
-        login_dialog = LoginDialog(user_db)
+        login_dialog = LoginDialog(cloud_auth)
         result = login_dialog.exec_()
         
         # 检查是否是退出系统
@@ -3227,24 +3227,29 @@ def main():
     def start_main_window(username, role):
         """启动画面完成后显示主窗口"""
         global main_window
-        main_window = MainWindow(user_db, log_db, username, role)
+        main_window = MainWindow(log_db, username, role)
         main_window.show()
     
     # 主循环：登录 → 主窗口 → 重新登录/退出
     while True:
-        username, role, exit_program = show_login_dialog()
-        print(f"DEBUG: 主循环 - username={username}, role={role}, exit_program={exit_program}")
-        
-        # 检查是否是退出系统
-        if exit_program:
-            print("DEBUG: 检测到退出系统，退出循环")
-            break  # 退出程序
-            
-        if username is None:
-            print("DEBUG: 用户取消登录，退出循环")
-            # 用户取消登录，退出程序
-            break
-        
+        if cloud_auth.is_available():
+            username, role, exit_program = show_login_dialog()
+            print(f"DEBUG: 主循环 - username={username}, role={role}, exit_program={exit_program}")
+
+            # 检查是否是退出系统
+            if exit_program:
+                print("DEBUG: 检测到退出系统，退出循环")
+                break  # 退出程序
+
+            if username is None:
+                print("DEBUG: 用户取消登录，退出循环")
+                # 用户取消登录，退出程序
+                break
+        else:
+            # 无法连接云端账户系统：跳过登录，直接以本地管理员身份进入
+            print("DEBUG: 无法连接云端账户系统，跳过登录")
+            username, role = OFFLINE_USERNAME, OFFLINE_ROLE
+
         need_relogin = run_main_window(username, role)
         if not need_relogin:
             print("DEBUG: 用户直接关闭窗口，退出循环")
