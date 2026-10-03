@@ -69,7 +69,8 @@ FastGuard 旨在构建一个 **轻量化、低成本、高度智能化** 的碰�
 - **GPU 加速**：CUDA 推理，CPU-GPU 无阻塞异步架构
 
 ### 其他
-- 登录/注册系统（SQLite3 + SHA256 加盐哈希）
+- 云端账户系统登录/注册（通过 `data/cloud_auth.json` 配置的后端路径校验，离线时自动跳过登录）
+- 本地运行日志存储（SQLite3）
 - 完整系统日志（GUI 实时滚动 + 文件持久化）
 - 参数可调节（置信度阈值、边缘强度等）
 
@@ -154,7 +155,7 @@ FastGuard 旨在构建一个 **轻量化、低成本、高度智能化** 的碰�
 | 页面 | 说明 |
 |------|------|
 | 启动加载页 | 盾牌图标 + 进度条，自动初始化模型与环境 |
-| 登录/注册页 | SHA256 密码哈希，支持记住密码，预设 admin/Admin123 |
+| 登录/注册页 | 账号由云端后端校验，支持记住密码；云端不可连接时跳过登录直接进入 |
 | 主界面 | 左侧导航栏 + 三路视频 + 右侧指标面板 + 控制面板 |
 | 参数设置 | 低置信度阈值、边缘强度阈值，支持恢复默认 |
 | 系统日志 | 黑色瀑布流实时滚动，15条内存缓冲，文件按时间戳归档 |
@@ -199,11 +200,30 @@ python main.py
 
 ### 使用流程
 
-1. 登录系统（默认管理员：`admin` / `Admin123`）
+1. 登录系统（账号由云端账户系统校验；若云端不可连接，则跳过登录直接进入）
 2. 点击「开启摄像头」实时监控，或「导入视频」离线分析
 3. 观察三路视频画面与实时预警信息
 4. 在「设置」中调整检测参数适配不同场景
 5. 通过「系统日志」查看运行记录与预警历史
+
+### 云端账户系统配置
+
+登录与注册均请求云端后端，配置位于 `data/cloud_auth.json`（首次运行自动生成）：
+
+```json
+{
+  "base_url": "https://your-cloud-host",
+  "login_path": "/api/fastguard/auth/login",
+  "register_path": "/api/fastguard/auth/register",
+  "timeout": 5
+}
+```
+
+- 登录请求：`POST {base_url}{login_path}`，JSON 体 `{"username": "...", "password": "..."}`，期望返回 `{"success": true, "role": "admin|user"}`
+- 注册请求：`POST {base_url}{register_path}`，JSON 体相同，期望返回 `{"success": true}`
+- 也可通过环境变量 `FASTGUARD_CLOUD_AUTH_CONFIG` 指定其他配置文件路径
+- `base_url` 可包含路径前缀（如 `https://host/backend`），会与 `login_path` / `register_path` 拼接
+- `base_url` 为空、网络异常或请求超时视为“无法连接云端”，此时跳过登录，以管理员身份进入本地系统
 
 ---
 
@@ -227,12 +247,20 @@ FastGuard/
 ├── side_alarm.py             # 侧向视觉预警
 ├── side_ipm.py               # 侧向专用 IPM
 ├── auth/                     # 用户认证模块
-│   └── db.py                 # UserDB / LogDB 实现
+│   ├── db.py                 # LogDB 本地日志存储
+│   ├── cloud.py              # 云端账户系统客户端
+│   ├── ui.py                 # 登录/注册对话框
+│   └── admin.py              # 后台管理面板
+├── cloud_backend/            # 云端账户后端 (Flask，独立部署)
+│   ├── app.py                # 登录/注册/健康检查接口
+│   ├── db.py                 # SQLite 用户存储 (Werkzeug 加盐哈希)
+│   └── .env.example          # 端口与管理员账号配置模板
 ├── deep_learning/            # 深度学习组件
 ├── assets/                   # 静态资源
 │   └── weights/              # 模型权重 (yolo11n.pt)
 ├── data/                     # 测试视频数据
-│   └── users.db              # SQLite 用户数据库
+│   ├── fastguard.db          # SQLite 本地日志数据库
+│   └── cloud_auth.json       # 云端账户系统配置
 ├── logs/                     # 系统日志 (按时间戳归档)
 └── bytetrack.yaml            # ByteTrack 跟踪器配置
 ```
@@ -262,8 +290,8 @@ FastGuard/
 
 ### 数据存储
 
-- SQLite3 (用户信息、运行日志)
-- JSON (记住密码缓存)
+- SQLite3 (本地运行日志)
+- JSON (记住密码缓存、云端账户系统配置)
 - YAML (跟踪器配置)
 - 文本日志 (按时间戳归档)
 

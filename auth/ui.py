@@ -4,7 +4,13 @@ from typing import Optional
 from PyQt5 import QtWidgets, QtCore, QtGui
 
 
-from .db import UserDB
+from .cloud import (
+    CloudAuthClient,
+    OFFLINE_ROLE,
+    OFFLINE_USERNAME,
+    STATUS_OK,
+    STATUS_UNAVAILABLE,
+)
 
 
 class LoginDialog(QtWidgets.QDialog):
@@ -99,9 +105,9 @@ class LoginDialog(QtWidgets.QDialog):
             """
         )
 
-    def __init__(self, user_db: UserDB, parent=None):
+    def __init__(self, cloud_auth: CloudAuthClient, parent=None):
         super().__init__(parent)
-        self.user_db = user_db
+        self.cloud_auth = cloud_auth
         self.username = ""
         self.role = ""
         self.exit_program = False  # 退出系统标志
@@ -353,11 +359,12 @@ class LoginDialog(QtWidgets.QDialog):
         password = self.input_pass.text().strip()
         if not username or not password:
             return
-        role = self.user_db.verify_user(username, password)
-        if role:
-            self.username = username
-            self.role = role
-            self.accept()
+        status, role = self.cloud_auth.login(username, password)
+        if status != STATUS_OK:
+            return
+        self.username = username
+        self.role = role
+        self.accept()
 
     def _show_msg(self, msg_type, title, text):
         msg = QtWidgets.QMessageBox(self)
@@ -408,13 +415,28 @@ class LoginDialog(QtWidgets.QDialog):
         msg.exec_()
 
 
+    def _skip_login(self, notice: str = None):
+        """无法连接云端账户系统时跳过登录，以本地管理员身份进入。"""
+        self.username = OFFLINE_USERNAME
+        self.role = OFFLINE_ROLE
+        self._show_msg(
+            "warning",
+            "离线模式",
+            notice or "无法连接云端账户系统，已跳过登录，以管理员身份进入。",
+        )
+        self.accept()
+
     def handle_login(self):
         username = self.input_user.text().strip()
         password = self.input_pass.text().strip()
         if not username or not password:
             self._show_msg("warning", "提示", "请输入用户名和密码")
             return
-        role = self.user_db.verify_user(username, password)
+        status, role = self.cloud_auth.login(username, password)
+        if status == STATUS_UNAVAILABLE:
+            # 云端账户系统在登录过程中失联，跳过登录直接进入
+            self._skip_login()
+            return
         if role:
             self.username = username
             self.role = role
@@ -503,14 +525,14 @@ class LoginDialog(QtWidgets.QDialog):
         if password != confirm:
             self._show_msg("warning", "提示", "两次输入的密码不一致")
             return
-        if self.user_db.user_exists(username):
-            self._show_msg("warning", "提示", "用户名已存在")
+        status = self.cloud_auth.register(username, password)
+        if status == STATUS_UNAVAILABLE:
+            self._show_msg("warning", "提示", "无法连接云端账户系统，暂时无法注册")
             return
-            
-        if self.user_db.create_user(username, password):
+        if status == STATUS_OK:
             self._show_msg("info", "成功", "注册成功，请登录")
             self.input_user.setText(username)
             self.input_pass.clear()
             self.switch_to_login()
         else:
-            self._show_msg("critical", "失败", "注册失败，请重试")
+            self._show_msg("critical", "失败", "注册失败，用户名可能已存在")

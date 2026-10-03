@@ -1,12 +1,11 @@
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets
 
-from .db import UserDB, LogDB
+from .db import LogDB
 
 
 class AdminPanel(QtWidgets.QDialog):
-    def __init__(self, user_db: UserDB, log_db: LogDB, parent=None):
+    def __init__(self, log_db: LogDB, parent=None):
         super().__init__(parent)
-        self.user_db = user_db
         self.log_db = log_db
         self.setWindowTitle("后台管理")
         self.resize(1600, 1000)
@@ -119,29 +118,6 @@ class AdminPanel(QtWidgets.QDialog):
         tabs = QtWidgets.QTabWidget()
         layout.addWidget(tabs)
 
-        # Users tab
-        users_tab = QtWidgets.QWidget()
-        users_layout = QtWidgets.QVBoxLayout(users_tab)
-
-        self.users_table = QtWidgets.QTableWidget(0, 3)
-        self.users_table.setHorizontalHeaderLabels(["用户名", "角色", "创建时间"])
-        self.users_table.horizontalHeader().setStretchLastSection(True)
-        self.users_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.users_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.users_table.verticalHeader().setDefaultSectionSize(90)
-        self.users_table.horizontalHeader().setFixedHeight(120)
-        users_layout.addWidget(self.users_table)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self.btn_refresh_users = QtWidgets.QPushButton("刷新用户")
-        self.btn_delete_user = QtWidgets.QPushButton("删除用户")
-        btn_row.addWidget(self.btn_refresh_users)
-        btn_row.addWidget(self.btn_delete_user)
-        btn_row.addStretch()
-        users_layout.addLayout(btn_row)
-
-        tabs.addTab(users_tab, "用户管理")
-
         # Logs tab
         logs_tab = QtWidgets.QWidget()
         logs_layout = QtWidgets.QVBoxLayout(logs_tab)
@@ -165,110 +141,10 @@ class AdminPanel(QtWidgets.QDialog):
 
         tabs.addTab(logs_tab, "日志管理")
 
-        self.btn_refresh_users.clicked.connect(self.load_users)
-        self.btn_delete_user.clicked.connect(self.delete_user)
         self.btn_refresh_logs.clicked.connect(self.load_logs)
         self.btn_clear_logs.clicked.connect(self.clear_logs)
 
-        self.load_users()
         self.load_logs()
-
-    def load_users(self):
-        users = self.user_db.list_users()
-        self.users_table.setRowCount(0)
-        for row in users:
-            r = self.users_table.rowCount()
-            self.users_table.insertRow(r)
-            for c, val in enumerate(row):
-                self.users_table.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
-
-    def delete_user(self):
-        row = self.users_table.currentRow()
-        if row < 0:
-            return
-        username = self.users_table.item(row, 0).text()
-        if username == "admin":
-            msg = QtWidgets.QMessageBox(self)
-            msg.setWindowTitle("提示")
-            msg.setText("管理员账号不可删除")
-            msg.setIcon(QtWidgets.QMessageBox.Warning)
-            msg.setStyleSheet("""
-                QMessageBox {
-                    background-color: #ffffff;
-                    color: #000000;
-                    min-width: 800px;
-                    min-height: 350px;
-                }
-                QMessageBox QLabel {
-                    color: #000000;
-                    font-size: 32px;
-                    font-family: 'Microsoft YaHei';
-                    qproperty-alignment: 'AlignCenter';
-                    padding: 30px;
-                }
-                QPushButton {
-                    background-color: #f0f0f0;
-                    color: #000000;
-                    border: 2px solid #cccccc;
-                    border-radius: 10px;
-                    padding: 20px 50px;
-                    font-size: 40px;
-                    font-weight: bold;
-                    min-width: 200px;
-                    min-height: 70px;
-                }
-                QPushButton:hover {
-                    background-color: #e0e0e0;
-                }
-                QPushButton:pressed {
-                    background-color: #d0d0d0;
-                }
-            """)
-            msg.exec_()
-            return
-        msg = QtWidgets.QMessageBox(self)
-        msg.setWindowTitle("确认")
-        msg.setText(f"确认删除用户 {username} 吗？")
-        msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-        msg.setDefaultButton(QtWidgets.QMessageBox.No)
-        msg.setStyleSheet("""
-            QMessageBox {
-                background-color: #ffffff;
-                color: #000000;
-                min-width: 800px;
-                min-height: 350px;
-            }
-            QMessageBox QLabel {
-                color: #000000;
-                font-size: 32px;
-                font-family: 'Microsoft YaHei';
-                qproperty-alignment: 'AlignCenter';
-                padding: 30px;
-            }
-            QPushButton {
-                background-color: #f0f0f0;
-                color: #000000;
-                border: 2px solid #cccccc;
-                border-radius: 10px;
-                padding: 20px 50px;
-                font-size: 40px;
-                font-weight: bold;
-                min-width: 200px;
-                min-height: 70px;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-            }
-            QPushButton:pressed {
-                background-color: #d0d0d0;
-            }
-        """)
-        if msg.exec_() != QtWidgets.QMessageBox.Yes:
-            return
-        if self.user_db.delete_user(username):
-            self.log_db.delete_logs_for_user(username)
-            self.load_users()
-            self.load_logs()
 
     def load_logs(self):
         logs = self.log_db.list_logs(None, limit=500)
