@@ -55,3 +55,6 @@ cloud_backend/*.db
 
 # CPU inference benchmark results
 benchmark_results/
+
+# INT8 量化校准数据集（导出用一次性数据，不提交/打包）
+assets/calibration/

@@ -6,3 +6,5 @@ Pillow
 # ByteTrack matching in ultralytics imports lap at module level
 lap>=0.5.12
 matplotlib
+# OpenVINO INT8 量化推理（main.py / core/video_thread.py 优先加载 *_int8_openvino_model）
+openvino

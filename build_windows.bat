@@ -58,7 +58,8 @@ set "EXCLUDES=%EXCLUDES% --exclude-module cryptography --exclude-module tkinter 
     --name FastGuard ^
     --contents-directory "." ^
     --collect-all ultralytics ^
-    --add-data "assets;assets" ^
+    --collect-all openvino ^
+    --add-data "assets\weights;assets\weights" ^
     --add-data "data;data" ^
     --add-data "bytetrack.yaml;." ^
     --runtime-hook "%~dp0pyi_rth_fastguard.py" ^

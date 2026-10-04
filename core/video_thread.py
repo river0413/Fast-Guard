@@ -456,7 +456,17 @@ class VideoThread(QtCore.QThread):
         else:
             model = ultralytics.YOLO(self.model_path)
 
-        self.model_signal.emit(os.path.basename(self.model_path))
+        # 优先使用 OpenVINO INT8 量化模型（CPU 持续吞吐更高、体积更小）；不可用则回退 FP32 .pt
+        _int8_dir = os.path.splitext(self.model_path)[0] + "_int8_openvino_model"
+        if os.path.isdir(_int8_dir):
+            try:
+                model = ultralytics.YOLO(_int8_dir, task="detect")
+                self.model_signal.emit(os.path.basename(_int8_dir))
+            except Exception as _int8_err:
+                print(f"INT8 模型加载失败，回退 FP32：{_int8_err}")
+                self.model_signal.emit(os.path.basename(self.model_path))
+        else:
+            self.model_signal.emit(os.path.basename(self.model_path))
 
         name_map = model.names if isinstance(model.names, dict) else {i: n for i, n in enumerate(model.names)}
         fps_value = self.fps

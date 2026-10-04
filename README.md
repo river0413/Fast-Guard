@@ -217,6 +217,16 @@ python scripts\benchmark_cpu.py --source 1 --device 0
 
 > 实测（i7-11800H，OBS 640×480，60 秒）：CPU `imgsz=640` 约 14.9 FPS，CPU `imgsz=320` 约 23.2 FPS，GPU 约 29.9 FPS（触顶视频源 30 FPS 上限）。生产代码 `main.py`、`core/video_thread.py` 已采用 `imgsz=320` 并固定物理核心线程数。
 
+### INT8 量化加速
+
+本项目支持 OpenVINO INT8 量化推理。INT8 模型通过 `ultralytics` 导出（`model.export(format="openvino", int8=True, data=..., imgsz=320)`，校准数据来自 OBS 实时采集的 200 帧），产物为 `assets\weights\yolo11n_int8_openvino_model\`（约 3.2 MB）。
+
+`main.py`、`core/video_thread.py` 在加载模型时会**优先加载 INT8 模型**（存在 `yolo11n_int8_openvino_model` 目录即启用），加载失败或目录缺失时自动回退 FP32 `.pt`，无需改动其他代码。
+
+> 实测（i7-11800H，OBS 640×480，60 秒，`imgsz=320`）：FP32 约 23.2 FPS，INT8 OpenVINO 约 29.7 FPS（+28%，触顶视频源 30 FPS 上限），推理延迟 41 → 20.6 ms。INT8 的收益主要来自持续负载下功耗更低、热节流更轻。
+
+依赖：运行 INT8 需 `openvino`（已加入 `requirements.txt`）；打包时 `build_windows.bat` 会 `--collect-all openvino`。校准数据集 `assets\calibration\` 仅用于导出，已加入 `.gitignore` 且不打包。
+
 ### 打包为 Windows 可执行程序
 
 项目使用 Python，以下脚本通过 PyInstaller 打包为可分发的 Windows 程序（并非把源码转换成 C）：
