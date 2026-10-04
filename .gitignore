@@ -58,3 +58,6 @@ benchmark_results/
 
 # INT8 量化校准数据集（导出用一次性数据，不提交/打包）
 assets/calibration/
+
+# INT8 导出尺寸扫描产物（临时，用于精度-速度对比）
+assets/weights/_int8_sweep/

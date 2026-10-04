@@ -14,7 +14,7 @@ import platform
 import statistics
 import sys
 import time
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import matplotlib
@@ -41,7 +41,10 @@ CSV_FIELDS = (
     "mode",
     "frame_width",
     "frame_height",
+    "rss_mb",
 )
+# Cap the in-memory plot series so multi-hour runs stay measurement-clean.
+PLOT_MAX_POINTS = 6000
 
 
 def non_negative_int(value: str) -> int:
@@ -145,6 +148,17 @@ def _rolling_fps(
     if span <= 0:
         return 0.0
     return (len(frame_times) - 1) / span
+
+
+def _memory_sampler():
+    """Return a callable reporting process RSS in MB, or None if psutil is absent."""
+    try:
+        import psutil
+
+        process = psutil.Process()
+        return lambda: process.memory_info().rss / (1024 * 1024)
+    except Exception:
+        return None
 
 
 def _percentile_summary(values: List[float]) -> Dict[str, float]:
@@ -306,25 +320,24 @@ class FastGuardInferenceRunner:
 
 
 def _save_plot(
-    rows: List[Dict[str, Any]],
+    samples: List[Tuple[float, float, float, Optional[float]]],
+    inference_samples: List[Tuple[float, float]],
     output_path: Path,
     cpu_name: str,
     model_name: str,
     average_fps: float,
 ) -> None:
     _configure_plot_fonts()
-    elapsed = [row["elapsed_seconds"] for row in rows]
-    rolling_fps = [row["rolling_fps"] for row in rows]
-    frame_cycle_ms = [row["frame_cycle_ms"] for row in rows]
-    inference_elapsed = [
-        row["elapsed_seconds"] for row in rows if row["inference_ms"] is not None
-    ]
-    inference_ms = [
-        row["inference_ms"] for row in rows if row["inference_ms"] is not None
-    ]
+    elapsed = [sample[0] for sample in samples]
+    rolling_fps = [sample[1] for sample in samples]
+    frame_cycle_ms = [sample[2] for sample in samples]
+    rss_mb = [sample[3] for sample in samples]
+    inference_elapsed = [sample[0] for sample in inference_samples]
+    inference_ms = [sample[1] for sample in inference_samples]
+    has_memory = any(value is not None for value in rss_mb)
 
-    figure, (fps_axis, latency_axis) = plt.subplots(
-        2, 1, figsize=(14, 9), sharex=True, constrained_layout=True
+    figure, (fps_axis, latency_axis, memory_axis) = plt.subplots(
+        3, 1, figsize=(14, 12), sharex=True, constrained_layout=True
     )
     fps_axis.plot(elapsed, rolling_fps, color="#147d64", linewidth=1.2)
     fps_axis.set_title(
@@ -355,6 +368,23 @@ def _save_plot(
     latency_axis.set_ylabel("Latency (ms)")
     latency_axis.grid(True, alpha=0.25)
     latency_axis.legend(loc="upper right")
+
+    if has_memory:
+        memory_axis.plot(elapsed, rss_mb, color="#5b2c8d", linewidth=1.2)
+        memory_axis.set_ylabel("Process RSS (MB)")
+        memory_axis.set_title("Process memory over time")
+    else:
+        memory_axis.text(
+            0.5,
+            0.5,
+            "psutil not installed - memory tracking unavailable",
+            ha="center",
+            va="center",
+            transform=memory_axis.transAxes,
+        )
+        memory_axis.set_ylabel("Process RSS (MB)")
+    memory_axis.set_xlabel("Elapsed time (s)")
+    memory_axis.grid(True, alpha=0.25)
     figure.savefig(output_path, dpi=160)
     plt.close(figure)
 
@@ -399,14 +429,32 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
             runner.process(frame, warmup_index)
 
         print(f"Measurement started: {args.duration:g}s.")
-        rows: List[Dict[str, Any]] = []
+        output_dir = args.output_dir.expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = f"fastguard_cpu_benchmark_{timestamp}"
+        csv_path = output_dir / f"{stem}.csv"
+        summary_path = output_dir / f"{stem}.json"
+        plot_path = output_dir / f"{stem}.png"
+
+        samples: List[Tuple[float, float, float, Optional[float]]] = []
+        inference_samples: List[Tuple[float, float]] = []
         preprocessing_latencies: List[float] = []
         inference_latencies: List[float] = []
+        rss_values: List[float] = []
+        modes_observed: set[str] = set()
         frame_times: Deque[float] = deque()
+        frames_measured = 0
+        inference_count = 0
         start_time = time.perf_counter()
         frame_index = args.warmup_frames
         frame_width = 0
         frame_height = 0
+        memory_sampler = _memory_sampler()
+        last_rss_mb: Optional[float] = None
+        csv_file = csv_path.open("w", newline="", encoding="utf-8-sig")
+        csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
+        csv_writer.writeheader()
 
         while time.perf_counter() - start_time < args.duration:
             cycle_start = time.perf_counter()
@@ -429,51 +477,66 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
             cycle_done = time.perf_counter()
             elapsed_seconds = cycle_done - start_time
             frame_cycle_ms = (cycle_done - cycle_start) * 1000
-            row: Dict[str, Any] = {
-                "frame_index": frame_index,
-                "elapsed_seconds": elapsed_seconds,
-                "capture_ms": (capture_done - cycle_start) * 1000,
-                "preprocess_ms": preprocess_ms,
-                "inference_ms": inference_ms,
-                "frame_cycle_ms": frame_cycle_ms,
-                "instant_fps": 1000 / frame_cycle_ms if frame_cycle_ms else 0.0,
-                "rolling_fps": _rolling_fps(elapsed_seconds, frame_times),
-                "inference_calls": inference_calls,
-                "mode": inference_mode,
-                "frame_width": frame_width,
-                "frame_height": frame_height,
-            }
-            rows.append(row)
+            if memory_sampler is not None and frame_index % 5 == 0:
+                last_rss_mb = memory_sampler()
+            rolling_fps = _rolling_fps(elapsed_seconds, frame_times)
+            if last_rss_mb is not None:
+                rss_values.append(last_rss_mb)
+            inference_count += inference_calls
+            modes_observed.add(inference_mode)
+            capture_ms = (capture_done - cycle_start) * 1000
+            csv_writer.writerow(
+                {
+                    "frame_index": frame_index,
+                    "elapsed_seconds": elapsed_seconds,
+                    "capture_ms": capture_ms,
+                    "preprocess_ms": preprocess_ms,
+                    "inference_ms": inference_ms,
+                    "frame_cycle_ms": frame_cycle_ms,
+                    "instant_fps": 1000 / frame_cycle_ms if frame_cycle_ms else 0.0,
+                    "rolling_fps": rolling_fps,
+                    "inference_calls": inference_calls,
+                    "mode": inference_mode,
+                    "frame_width": frame_width,
+                    "frame_height": frame_height,
+                    "rss_mb": last_rss_mb,
+                }
+            )
+            # Bounded plot series: long runs decimate in place instead of growing.
+            samples.append((elapsed_seconds, rolling_fps, frame_cycle_ms, last_rss_mb))
+            if len(samples) > PLOT_MAX_POINTS:
+                del samples[1::2]
+            if inference_ms is not None:
+                inference_samples.append((elapsed_seconds, inference_ms))
+                if len(inference_samples) > PLOT_MAX_POINTS:
+                    del inference_samples[1::2]
+            frames_measured += 1
             frame_index += 1
 
     finally:
         capture.release()
+        csv_file.close()
 
-    if not rows:
+    if not frames_measured:
         raise RuntimeError("No frames were measured; no benchmark report was created.")
     if not inference_latencies:
         raise RuntimeError(
             "No model inference calls were measured. Increase --duration and retry."
         )
 
-    elapsed_seconds = rows[-1]["elapsed_seconds"]
-    frame_cycles = [row["frame_cycle_ms"] for row in rows]
-    average_fps = len(rows) / elapsed_seconds
-    inference_count = sum(row["inference_calls"] for row in rows)
-    modes_observed = sorted({row["mode"] for row in rows})
+    elapsed_seconds = samples[-1][0]
+    frame_cycles = [sample[2] for sample in samples]
+    average_fps = frames_measured / elapsed_seconds
+    memory_stats: Dict[str, Any] = {}
+    if rss_values:
+        memory_stats = {
+            "start_mb": rss_values[0],
+            "end_mb": rss_values[-1],
+            "min_mb": min(rss_values),
+            "max_mb": max(rss_values),
+            "drift_mb": rss_values[-1] - rss_values[0],
+        }
     cpu_name = _cpu_name()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = args.output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"fastguard_cpu_benchmark_{timestamp}"
-    csv_path = output_dir / f"{stem}.csv"
-    summary_path = output_dir / f"{stem}.json"
-    plot_path = output_dir / f"{stem}.png"
-
-    with csv_path.open("w", newline="", encoding="utf-8-sig") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
 
     summary = {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -488,17 +551,18 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
         "model": str(weights),
         "camera_index": args.source,
         "frame_size": [frame_width, frame_height],
-        "inference_modes_observed": modes_observed,
+        "inference_modes_observed": sorted(modes_observed),
         "requested_duration_seconds": args.duration,
         "measured_duration_seconds": elapsed_seconds,
         "warmup_frames": args.warmup_frames,
-        "frames_processed": len(rows),
+        "frames_processed": frames_measured,
         "inference_calls": inference_count,
         "processed_frame_fps": average_fps,
         "inference_calls_per_second": inference_count / elapsed_seconds,
         "preprocessing_latency_ms": _percentile_summary(preprocessing_latencies),
         "frame_cycle_latency_ms": _percentile_summary(frame_cycles),
         "inference_latency_ms": _percentile_summary(inference_latencies),
+        "process_memory_mb": memory_stats,
         "artifacts": {
             "csv": str(csv_path),
             "summary": str(summary_path),
@@ -508,10 +572,10 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     with summary_path.open("w", encoding="utf-8") as summary_file:
         json.dump(summary, summary_file, ensure_ascii=False, indent=2)
 
-    _save_plot(rows, plot_path, cpu_name, weights.name, average_fps)
+    _save_plot(samples, inference_samples, plot_path, cpu_name, weights.name, average_fps)
 
     print(f"CPU: {cpu_name}")
-    print(f"Processed frames: {len(rows)} in {elapsed_seconds:.2f}s")
+    print(f"Processed frames: {frames_measured} in {elapsed_seconds:.2f}s")
     print(f"Average processed-frame FPS: {average_fps:.2f}")
     print(f"Inference calls/s: {inference_count / elapsed_seconds:.2f}")
     if inference_latencies:
@@ -520,6 +584,13 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
             f"{sum(inference_latencies) / len(inference_latencies):.2f} ms"
         )
     print(f"Frame latency p95: {np.percentile(frame_cycles, 95):.2f} ms")
+    if memory_stats:
+        print(
+            f"Process RSS: start {memory_stats['start_mb']:.1f} MB, "
+            f"end {memory_stats['end_mb']:.1f} MB, "
+            f"drift {memory_stats['drift_mb']:+.1f} MB, "
+            f"max {memory_stats['max_mb']:.1f} MB"
+        )
     print(f"Results: {output_dir}")
     return summary
 

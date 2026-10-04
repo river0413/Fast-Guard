@@ -51,6 +51,8 @@ class IPM_Transformer:
         """
         将像素点 (u,v) 映射到地平面坐标 (X, Y)，单位米。
         返回 None 表示射线未与地面相交（例如指向天空）。
+
+        注意：图像 v 轴向下增长，而相机 y 轴向上，因此 y_cam 取 (cy - v)。
         """
         h, w = frame_shape
         if self.frame_w != w or self.frame_h != h:
@@ -59,9 +61,9 @@ class IPM_Transformer:
         if any(x is None for x in [self.fx, self.fy, self.cx, self.cy]):
             return None
 
-        # 像素 -> 相机坐标归一化方向
+        # 像素 -> 相机坐标归一化方向（y 轴向上为正）
         x_cam = (u - self.cx) / self.fx
-        y_cam = (v - self.cy) / self.fy
+        y_cam = (self.cy - v) / self.fy
         z_cam = 1.0
 
         # 俯仰、偏航旋转
@@ -93,6 +95,8 @@ class IPM_Transformer:
         """
         将地平面坐标 (X, Y) 映射到像素坐标 (u, v)。
         返回 None 表示无法映射。
+
+        注意：与 pixel_to_ground 保持一致，v 由 -y_cam 得到（图像 v 轴向下）。
         """
         h, w = frame_shape
         if self.frame_w != w or self.frame_h != h:
@@ -127,8 +131,8 @@ class IPM_Transformer:
         x_cam = x2 / z2
         y_cam = y2 / z2
 
-        # 相机坐标到像素坐标
+        # 相机坐标到像素坐标（v 轴向下，故取负号）
         u = self.fx * x_cam + self.cx
-        v = self.fy * y_cam + self.cy
+        v = self.cy - self.fy * y_cam
 
         return u, v

@@ -213,9 +213,9 @@ python scripts\benchmark_cpu.py --source 1 --weights assets\weights\yolo11n.pt -
 python scripts\benchmark_cpu.py --source 1 --device 0
 ```
 
-脚本按主程序的 2.4:1 宽高比阈值自动选择单目/双目分支；`--imgsz` 控制 YOLO 推理分辨率（默认 640，CPU 下 320 可提速约 1.6×），`--threads` 控制 torch CPU 线程数（默认物理核心数）。测试结果会写入 `benchmark_results`，包含逐帧 CSV、运行环境和统计摘要 JSON，以及覆盖全程的 FPS/延迟 PNG 图。CSV 的 `rolling_fps` 是 1 秒滑动帧率；摘要提供平均处理帧率、模型调用吞吐量及预处理/帧周期/推理延迟的均值、中位数和 P95。请在目标 i7-11800H 机器上运行，并以摘要中的 CPU 字段确认测试硬件。
+脚本按主程序的 2.4:1 宽高比阈值自动选择单目/双目分支；`--imgsz` 控制 YOLO 推理分辨率（默认 640，CPU 下 320 可提速约 1.6×），`--threads` 控制 torch CPU 线程数（默认物理核心数）。测试结果会写入 `benchmark_results`，包含逐帧 CSV、运行环境和统计摘要 JSON，以及覆盖全程的 FPS / 延迟 / 进程内存 PNG 图。CSV 的 `rolling_fps` 是 1 秒滑动帧率，`rss_mb` 为进程常驻内存；摘要提供平均处理帧率、模型调用吞吐量，以及预处理/帧周期/推理延迟的均值、中位数和 P95，另含内存起止值与漂移量（`process_memory_mb`）。长时运行（如 `--duration 900`）可用于观察热节流导致的速度衰减与内存泄漏。请在目标 i7-11800H 机器上运行，并以摘要中的 CPU 字段确认测试硬件。
 
-> 实测（i7-11800H，OBS 640×480，60 秒）：CPU `imgsz=640` 约 14.9 FPS，CPU `imgsz=320` 约 23.2 FPS，GPU 约 29.9 FPS（触顶视频源 30 FPS 上限）。生产代码 `main.py`、`core/video_thread.py` 已采用 `imgsz=320` 并固定物理核心线程数。
+> 实测（i7-11800H，OBS 640×480，60 秒）：CPU `imgsz=640` 约 14.0 FPS，CPU `imgsz=320` 约 21.8 FPS，GPU 约 29.9 FPS（触顶视频源 30 FPS 上限）。生产代码 `main.py`、`core/video_thread.py` 已采用 `imgsz=320` 并固定物理核心线程数。
 
 ### INT8 量化加速
 
@@ -223,9 +223,99 @@ python scripts\benchmark_cpu.py --source 1 --device 0
 
 `main.py`、`core/video_thread.py` 在加载模型时会**优先加载 INT8 模型**（存在 `yolo11n_int8_openvino_model` 目录即启用），加载失败或目录缺失时自动回退 FP32 `.pt`，无需改动其他代码。
 
-> 实测（i7-11800H，OBS 640×480，60 秒，`imgsz=320`）：FP32 约 23.2 FPS，INT8 OpenVINO 约 29.7 FPS（+28%，触顶视频源 30 FPS 上限），推理延迟 41 → 20.6 ms。INT8 的收益主要来自持续负载下功耗更低、热节流更轻。
+> 实测（i7-11800H，OBS 640×480，45 秒，`imgsz=320`）：FP32 约 21.8 FPS，INT8 OpenVINO 约 29.9 FPS（+37%，触顶视频源 30 FPS 上限），推理延迟 44.8 → 19.4 ms。INT8 的收益主要来自持续负载下功耗更低、热节流更轻。
 
 依赖：运行 INT8 需 `openvino`（已加入 `requirements.txt`）；打包时 `build_windows.bat` 会 `--collect-all openvino`。校准数据集 `assets\calibration\` 仅用于导出，已加入 `.gitignore` 且不打包。
+
+#### INT8 量化精度验证
+
+使用标注数据集（COCO128，128 张标注图）对比 FP32 与 INT8 的精度/速度：
+
+```bash
+# 默认 fp32 + int8，imgsz 320 与 640（需先准备 coco128 数据集）
+python scripts\validate_quantization.py --data coco128.yaml --imgsz 320,640
+
+# 多尺寸扫描：每个尺寸一个固定输入的 INT8 模型（LABEL=PATH，标签以 int8 开头即归入量化曲线）
+python scripts\validate_quantization.py --data coco128.yaml --imgsz 160,256,320,416,512,640 ^
+  --models "fp32=assets\weights\yolo11n.pt,int8_320=assets\weights\yolo11n_int8_openvino_model"
+```
+
+> **导出模型输入尺寸固定**：OpenVINO 模型在导出时即固定输入尺寸（`yolo11n_int8_openvino_model` 为 320×320），脚本会自动跳过尺寸不匹配的组合并提示重新导出；多尺寸对比需为每个尺寸单独导出（`model.export(format="openvino", int8=True, data=..., imgsz=N)`）。
+
+**精度扫描**（i7-11800H，COCO128，6 个尺寸 × 2 种精度）：
+
+| imgsz | FP32 mAP50-95 | INT8 mAP50-95 | 精度变化 | FP32 单帧推理 | INT8 单帧推理 | 加速比 |
+|------:|--------------:|--------------:|--------:|-------------:|-------------:|------:|
+| 160 | 0.186 | 0.189 | **+1.4%** | 5.9 ms | 6.9 ms | 0.85× |
+| 256 | 0.319 | 0.322 | **+1.1%** | 10.4 ms | 8.8 ms | 1.18× |
+| 320 | 0.380 | 0.367 | −3.4% | 16.2 ms | 11.6 ms | 1.39× |
+| 416 | 0.423 | 0.417 | −1.4% | 27.3 ms | 20.8 ms | 1.31× |
+| 512 | 0.464 | 0.447 | −3.7% | 48.2 ms | 23.9 ms | 2.02× |
+| 640 | 0.501 | 0.461 | −7.9% | 69.2 ms | 32.2 ms | 2.15× |
+
+关键结论：
+
+- **低分辨率下 INT8 精度反而略优**（160/256 尺寸为正增益）——量化在小模型上起到正则化作用。
+- **精度损失随分辨率增大**（640 时 −7.9%），**但速度增益同步增大**（0.85× → 2.15×）：小尺寸受固定开销支配，大尺寸才体现 INT8 的计算优势。
+- **召回率基本无损**：`imgsz=320` 时 FP32 与 INT8 的整体召回率均为 0.486；FastGuard 关注的安全类别（行人 +0.4%、卡车 +8.3%，其余持平）无一漏检恶化。
+
+**端到端吞吐**（OBS 640×480 视频源，45 秒/组，含预处理与跳帧节奏）：
+
+| 配置 | 平均 FPS | 单帧推理 | 帧延迟 P95 | 进程内存 |
+|------|--------:|--------:|----------:|--------:|
+| FP32 `imgsz=320` | 21.8 | 44.8 ms | 111.5 ms | 562 MB |
+| FP32 `imgsz=512` | 15.0 | 76.3 ms | 159.9 ms | 578 MB |
+| FP32 `imgsz=640` | 14.0 | 84.8 ms | 164.2 ms | 587 MB |
+| **INT8 `imgsz=320`** | **29.9（触顶）** | 19.4 ms | 77.6 ms | 833 MB |
+| **INT8 `imgsz=512`** | **25.0** | 37.5 ms | 99.2 ms | 848 MB |
+| INT8 `imgsz=640` | 19.0 | 55.7 ms | 130.6 ms | 859 MB |
+
+**最优工作点**：`INT8 @ imgsz=512` 的精度（0.447）比 `FP32 @ imgsz=320`（0.380）**高 17.6%**，同时帧率（25.0 FPS）也**更高**（21.8 FPS）——即在精度和速度上同时优于 FP32 默认配置。若需极致帧率（触顶 30 FPS 视频源），仍应选 `INT8 @ imgsz=320`。
+
+> 注：INT8 的进程内存比 FP32 高约 270 MB（OpenVINO 运行时开销），在内存受限设备上需权衡。
+
+#### 长时稳定性（15 分钟连续运行）
+
+`python scripts\benchmark_cpu.py --source 1 --weights assets\weights\yolo11n_int8_openvino_model --imgsz 320 --duration 900`（INT8@320，26724 帧）：
+
+| 时段 | 平均 FPS | 进程 RSS |
+|------|--------:|--------:|
+| 0–3 min | 30.12 | 829.7 MB |
+| 3–6 min | 30.14 | 831.3 MB |
+| 6–9 min | 30.04 | 832.4 MB |
+| 9–12 min | 29.89 | 833.2 MB |
+| 12–15 min | 29.94 | 834.0 MB |
+
+- **无热节流**：首分钟 30.18 FPS → 末分钟 29.71 FPS（−1.6%），全程稳定在视频源 30 FPS 上限，说明笔记本长时间推理不会因发热降频。
+- **内存收敛而非泄漏**：总漂移 +25.3 MB，但增速递减——前 7.5 分钟 0.46 MB/min，后 7.5 分钟 0.26 MB/min；各 3 分钟窗口增量依次为 +1.6 / +1.1 / +0.8 MB，末 3 分钟波动仅 0.8 MB。这是分配器预热与缓存增长趋于稳定的特征，**未见线性泄漏**。
+- 测量口径：benchmark 会流式写入 CSV，并对绘图序列做有界降采样（`PLOT_MAX_POINTS`），因此长时运行不会被测试程序自身的内存占用污染。
+
+### 前向链路功能回归测试
+
+`tests\test_front_path.py` 覆盖前向（正面）链路：TTC 计算、正面碰撞检测器、正面报警去抖动、IPM 前向投影，以及「接近目标 → 报警升级」的端到端集成。**侧向/盲区检测模块不在测试范围内**。
+
+```bash
+pytest tests\test_front_path.py -v      # 需 pytest
+python tests\test_front_path.py         # 无需 pytest，也可独立运行
+```
+
+23 项断言通过，覆盖：静止目标强制安全、接近目标触发告警、安全距离内强制危险、走廊外快速横移抑制、轨迹过期清理、去抖动确认帧与质量感知、报警升级时序，以及 IPM 前向测距与 SDT 单位。
+
+> **已修复的三个问题**（均在 `core/ipm.py`、`core/front_detector.py`、`core/calculator.py`）：
+>
+> 1. **IPM 纵向轴符号**：`pixel_to_ground` 原本把地面映射到画面上半部（地平线在 v≈285 而非 v≈195），真实检测框底部（v≈300–480）一律返回 `None`。已改为上正（`y_cam = (cy - v) / fy`），`ground_to_pixel` 同步改为 `v = cy - fy * y_cam`。修复后地平线回到中心上方，距离随 v 增大单调递减（v=240→9.96 m，v=479→1.41 m），往返一致；侧向 `get_wall_pixel_x` 输出的 x 完全不变（492/524、169/145），此前恒为 `None` 的侧向 `pixel_to_ground` 也恢复为合理值。
+> 2. **静止判定被覆盖**：`phys_distance < 3 m` 的近距硬触发排在静止判定之后并覆盖它，导致约 1.8 m 处的静止目标持续报危险。已加入 `and not is_static`。
+> 3. **SDT 单位混用**：`sdt_dyn` 把 `vy`（像素/秒）与 `v_self_mps`（米/秒）相加，使 SDT 膨胀到数百米，`close_enough` 近乎恒真。已改为统一米制：`front_detector` 使用 IPM 距离差分得到的目标接近速度（m/s），`calculator` 因无米制目标速度而只取本车速度。
+>
+> **影响评估（更正）**：最初用 `v_self_mps=0` 合成场景测得「4/5 场景告警升级」，但在**生产等效参数**（`v_self_mps=11.1`、`distance=obj_dist` 由单目框高估距提供）下复测，告警等级在修复前后**均为危险（2 级）**——因为 SDT 早已饱和、`close_enough` 恒真。因此本次修复对生产告警等级的**净影响很小**，实际变化是：
+> - `phys_distance` 的来源由**单目框高估距**切换为**IPM 地面距离**（前者在 `ground_distance` 为 `None` 时作为兜底，现已让位）；
+> - 模型B（IPM 距离差分）TTC 由失效恢复为参与「双模型取最小值」。
+>
+> 修复 2、3 会**降低**误报（静止物体不再报危险；远处目标不再因 SDT 膨胀误判危险），同时保留真实近距危险告警（D<3 m 且非静止 → 危险）。
+>
+> **仍存在的相关单位问题（未修改）**：`front_detector` 中距离兜底 TTC `ttc_by_dist = abs(provided_distance / vy_world)` 与 `calculator` 中的 `v_rel_eff` 同样混用米制距离与像素/秒速度；`vy_gate`（用于横穿目标的 TTC 衰减）与 SDT 的 `-vy` 项作用符号相反。这些不在本次修复范围内。
+
+> 注：COCO128 为小规模子集，逐类数值存在噪声；如需更严谨结论，请用完整 COCO val2017 或自有标注集复测。
 
 ### 打包为 Windows 可执行程序
 
@@ -239,14 +329,19 @@ build_windows.bat
 
 产物为 `dist\FastGuard\FastGuard.exe`，需连同整个 `dist\FastGuard` 目录一起分发。
 
+> **打包环境需安装 `openvino`**：`pip install -r requirements.txt` 会一并安装。若打包环境缺少 `openvino`，应用仍可运行但会在加载 INT8 模型失败后静默回退 FP32 `.pt`。
+
 #### 产物瘦身
 
-`build_windows.bat` 已内置瘦身措施，实测产物由约 5.6 GB 降到约 0.67 GB：
+`build_windows.bat` 已内置瘦身措施，实测产物由约 5.6 GB 降到约 0.67 GB（启用 INT8/OpenVINO 后约 **0.92 GB**）：
 
 | 措施 | 体积影响 | 原因 |
 |------|----------|------|
 | 用 `setup_build_env.bat` 安装 CPU 版 PyTorch 后再打包 | 约 -3.5 GB | 程序固定使用 `device = 'cpu'` 推理（见 `main.py`、`core/video_thread.py`），`torch/lib` 内的 CUDA 运行库不会被加载 |
 | 脚本中的 `--exclude-module` 排除未被引用的包 | 约 -1.4 GB | PaddlePaddle（约 1.2 GB）、Polars/PyArrow、pandas、transformers、torchaudio 等由 `--collect-all ultralytics` 顺带收集，但在本程序的推理路径上不可达（已用 CPU 版 YOLO + ByteTrack 实测验证） |
+| `--collect-all openvino` 引入 OpenVINO 运行时 | 约 +245 MB | 启用 INT8 量化推理所需；可在不需要 INT8 时移除该参数与 `assets\weights\yolo11n_int8_openvino_model\` |
+
+打包验证（实测）：`dist\FastGuard` 共 915 MB，含 `FastGuard.exe`（27.5 MB）、`assets\weights\yolo11n_int8_openvino_model\`（3.2 MB）与 `openvino\`（243.5 MB，含 `_pyopenvino.cp310-win_amd64.pyd` 原生绑定及 `ultralytics\nn\backends\openvino.py`）。校准数据集 `assets\calibration\` 未进入产物。
 
 其他注意事项：
 

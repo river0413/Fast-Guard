@@ -135,7 +135,8 @@ class TTCCalculator:
             # vy <0 表示靠近相机；这里简化用距离帧差推算 vx/纵向相对速度
             v_rel_eff = ( (ys[-1] - ys[-2]) * self.fps - float(global_vy) ) - v_self_mps
         # 动态 SDT： (V_self + V_obj) * t_reaction + d_safe
-        sdt_dyn = (max(0.0, v_self_mps) + max(0.0, -vy)) * t_reaction + d_safe
+        # 单位统一为 m/s；此处没有米制的目标接近速度，取 0，仅使用本车速度
+        sdt_dyn = max(0.0, v_self_mps) * t_reaction + d_safe
         ttc_threshold = 2.0
 
         # 视觉冲突过滤（背景流）：若 vx 与 (x-中心) 同向且 v_rel_eff 近 0，视为背景

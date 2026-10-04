@@ -213,6 +213,7 @@ class FrontCollisionDetector:
         
         # 模型B TTC：IPM 物理距离差分
         ttc_b = self.safe_ttc
+        v_obj_mps = 0.0  # 目标接近速度（m/s），供 SDT 使用，单位与 v_self_mps 一致
         dist_hist = self.ground_dist_history[track_id]
         if ground_distance is not None and len(dist_hist) >= 2:
             d_prev = dist_hist[-2]
@@ -220,6 +221,7 @@ class FrontCollisionDetector:
             v_rel = (d_prev - d_cur) * self.fps  # m/s，正值表示接近
             if v_rel > 1e-3 and d_cur > 1e-3:
                 ttc_b = d_cur / v_rel
+                v_obj_mps = v_rel
         
         # 双模型 TTC 取更小值，防止单模型失效
         ttc = min(ttc, ttc_b)
@@ -269,8 +271,8 @@ class FrontCollisionDetector:
         
         phys_distance = ground_distance if ground_distance is not None else provided_distance
         
-        # 动态 SDT 计算
-        sdt_dyn = (max(0.0, v_self_mps) + max(0.0, -vy)) * t_reaction + d_safe
+        # 动态 SDT 计算：单位统一为 m/s（本车速度 + 目标接近速度）
+        sdt_dyn = (max(0.0, v_self_mps) + v_obj_mps) * t_reaction + d_safe
         
         # 动态 TTC 阈值（可配置参数）
         ttc_threshold = min(self.ttc_max, max(self.ttc_min, self.ttc_base + float(v_self_mps) * self.ttc_speed_factor))
@@ -302,7 +304,8 @@ class FrontCollisionDetector:
             risk_level = 0
         
         # 物理距离近场硬触发：D < 3m 直接危险
-        if phys_distance is not None and phys_distance < 3.0:
+        # 静止目标不构成碰撞风险（画面空间无相对运动），不应被近距条件覆盖为危险
+        if phys_distance is not None and phys_distance < 3.0 and not is_static:
             risk_level = 2
         
         final_risk = risk_level
