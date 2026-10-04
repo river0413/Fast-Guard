@@ -2,3 +2,7 @@ ultralytics
 PyQt5
 opencv-python
 numpy
+Pillow
+# ByteTrack matching in ultralytics imports lap at module level
+lap>=0.5.12
+matplotlib

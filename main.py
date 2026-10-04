@@ -736,6 +736,11 @@ class VideoThread(QtCore.QThread):
         # 强制使用 CPU 推理（RTX 50 系 sm_120 与 cu126 版 PyTorch 不兼容，避免 CUDA kernel 缺失崩溃）
         device = 'cpu'
 
+        # CPU 线程数优化：显式使用物理核心数，避免超线程调度损耗（i7-11800H 为 8 物理核）
+        _logical_cores = os.cpu_count() or 1
+        _physical_cores = _logical_cores // 2 if _logical_cores >= 8 else _logical_cores
+        torch.set_num_threads(max(1, _physical_cores))
+
         # 缓存上一帧的追踪结果
         last_results = None
         deferred_draws = []
@@ -929,7 +934,7 @@ class VideoThread(QtCore.QThread):
                         inference_frame,
                         persist=True,
                         verbose=False,
-                        imgsz=640,
+                        imgsz=320,
                         conf=0.10,
                         iou=0.5,
                         tracker="bytetrack.yaml",
@@ -942,11 +947,11 @@ class VideoThread(QtCore.QThread):
                 if self._frame_count % 3 == 0 or self._upper_results is None:
                     self._upper_results = model.predict(
                         self._upper_enhanced, verbose=False,
-                        imgsz=640, conf=0.10, iou=0.5, device=device)
+                        imgsz=320, conf=0.10, iou=0.5, device=device)
                 if self._frame_count % 3 != 2 or self._lower_results is None:
                     self._lower_results = model.predict(
                         self._lower_enhanced, verbose=False,
-                        imgsz=640, conf=0.10, iou=0.5, device=device)
+                        imgsz=320, conf=0.10, iou=0.5, device=device)
                 results = None  # 非 SBS 路径不再使用 results
 
             infos = []

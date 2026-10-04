@@ -1,0 +1,5 @@
+path: G:\projectsnew\Fast-Guard-main\assets\calibration
+train: images
+val: images
+names:
+  0: object

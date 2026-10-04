@@ -198,6 +198,53 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### CPU 推理性能测试（OBS 虚拟摄像头）
+
+测试前在 OBS 中加载城市天际线 1POV 视频并启动 OBS Virtual Camera，并确认 `assets\weights\yolo11n.pt` 权重文件已存在（或用 `--weights` 指定权重）。该脚本复现 `main.py` 的 CPU 推理分支：普通比例画面采用上下分块增强与 YOLO `predict`，超宽 SBS 画面采用 YOLO + ByteTrack `track`。采集、图像预处理、模型推理耗时分开统计；测试不包括 GUI 绘制及其余碰撞分析逻辑。
+
+```bash
+# 默认使用摄像头索引 0、测试 60 秒；根据本机设备调整 --source
+python scripts\benchmark_cpu.py --source 0
+
+# 可选：指定权重、测试时长、输出目录、推理分辨率与线程数
+python scripts\benchmark_cpu.py --source 1 --weights assets\weights\yolo11n.pt --duration 120 --imgsz 320 --threads 8 --output-dir benchmark_results
+
+# 如需对比 GPU：--device 0（有 CUDA 时）
+python scripts\benchmark_cpu.py --source 1 --device 0
+```
+
+脚本按主程序的 2.4:1 宽高比阈值自动选择单目/双目分支；`--imgsz` 控制 YOLO 推理分辨率（默认 640，CPU 下 320 可提速约 1.6×），`--threads` 控制 torch CPU 线程数（默认物理核心数）。测试结果会写入 `benchmark_results`，包含逐帧 CSV、运行环境和统计摘要 JSON，以及覆盖全程的 FPS/延迟 PNG 图。CSV 的 `rolling_fps` 是 1 秒滑动帧率；摘要提供平均处理帧率、模型调用吞吐量及预处理/帧周期/推理延迟的均值、中位数和 P95。请在目标 i7-11800H 机器上运行，并以摘要中的 CPU 字段确认测试硬件。
+
+> 实测（i7-11800H，OBS 640×480，60 秒）：CPU `imgsz=640` 约 14.9 FPS，CPU `imgsz=320` 约 23.2 FPS，GPU 约 29.9 FPS（触顶视频源 30 FPS 上限）。生产代码 `main.py`、`core/video_thread.py` 已采用 `imgsz=320` 并固定物理核心线程数。
+
+### 打包为 Windows 可执行程序
+
+项目使用 Python，以下脚本通过 PyInstaller 打包为可分发的 Windows 程序（并非把源码转换成 C）：
+
+```bash
+# 首次打包：先创建只含 CPU 版 PyTorch 的打包环境
+setup_build_env.bat
+build_windows.bat
+```
+
+产物为 `dist\FastGuard\FastGuard.exe`，需连同整个 `dist\FastGuard` 目录一起分发。
+
+#### 产物瘦身
+
+`build_windows.bat` 已内置瘦身措施，实测产物由约 5.6 GB 降到约 0.67 GB：
+
+| 措施 | 体积影响 | 原因 |
+|------|----------|------|
+| 用 `setup_build_env.bat` 安装 CPU 版 PyTorch 后再打包 | 约 -3.5 GB | 程序固定使用 `device = 'cpu'` 推理（见 `main.py`、`core/video_thread.py`），`torch/lib` 内的 CUDA 运行库不会被加载 |
+| 脚本中的 `--exclude-module` 排除未被引用的包 | 约 -1.4 GB | PaddlePaddle（约 1.2 GB）、Polars/PyArrow、pandas、transformers、torchaudio 等由 `--collect-all ultralytics` 顺带收集，但在本程序的推理路径上不可达（已用 CPU 版 YOLO + ByteTrack 实测验证） |
+
+其他注意事项：
+
+- `dist/`、`build/`、`*.spec` 已在 `.gitignore` 中，不要把 `dist\FastGuard` 重新压缩后提交到仓库。
+- 如需自行压缩分发，请压缩整个 `dist\FastGuard` 目录；其中大部分是已压缩的 DLL，Zip 通常只能再缩小约三成。
+- 若确实需要 CUDA 推理，用带 CUDA 版 PyTorch 的环境打包即可：`set FASTGUARD_BUILD_PYTHON=D:\path\to\python.exe` 后再运行 `build_windows.bat`，产物会增大约 3.5 GB。
+- `requirements.txt` 中的 `lap` 是 ByteTrack 匹配的必需依赖，打包后位于 `dist\FastGuard\lap\`。
+
 ### 使用流程
 
 1. 登录系统（账号由云端账户系统校验；若云端不可连接，则跳过登录直接进入）

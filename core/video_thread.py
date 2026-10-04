@@ -464,6 +464,11 @@ class VideoThread(QtCore.QThread):
         # 强制使用 CPU 推理（RTX 50 系 sm_120 与 cu126 版 PyTorch 不兼容，避免 CUDA kernel 缺失崩溃）
         device = 'cpu'
 
+        # CPU 线程数优化：显式使用物理核心数，避免超线程调度损耗（i7-11800H 为 8 物理核）
+        _logical_cores = os.cpu_count() or 1
+        _physical_cores = _logical_cores // 2 if _logical_cores >= 8 else _logical_cores
+        torch.set_num_threads(max(1, _physical_cores))
+
         # 缓存上一帧的追踪结果
         last_results = None
         deferred_draws = []
@@ -637,11 +642,11 @@ class VideoThread(QtCore.QThread):
                     inference_frame,
                     persist=True,
                     verbose=False,
-                    imgsz=640,          # 进一步降低分辨率以提升速度 (640 是 YOLO 标准值)
+                    imgsz=320,          # 降低分辨率以提升速度（CPU 推理下 320 兼顾速度与精度）
                     conf=0.1,
                     iou=0.5,
                     tracker="bytetrack.yaml",
-                    device=device       # 明确使用 GPU
+                    device=device       # 明确使用 CPU
                 )
                 last_results = results
             else:

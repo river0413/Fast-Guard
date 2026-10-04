@@ -38,6 +38,13 @@ runs/
 *.docx
 *.pdf
 
+# 课程资料与答辩演示文件
+2020-写作与表达课程-*.pptx
+FastGuard-答辩演示-*.pptx
+~$FastGuard-答辩演示-*.pptx
+ppt(2).pptx
+~$ppt(2).pptx
+
 # 云端后端本地配置与数据库（含管理员口令，勿提交）
 cloud_backend/.env
 cloud_backend/*.db
@@ -45,3 +52,6 @@ cloud_backend/*.db
 # SQLite 运行时副产物
 *.db-shm
 *.db-wal
+
+# CPU inference benchmark results
+benchmark_results/
