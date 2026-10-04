@@ -201,8 +201,8 @@ class VideoThread(QtCore.QThread):
         self.weak_conf_threshold = float(weak_conf_threshold)
         self.edge_strength_threshold = float(edge_strength_threshold)
         
-        # 使用全局日志记录器
-        SYSTEM_LOGGER.info(f"VideoThread | 视频：{self.source} | 模型：{self.model_name}")
+        # 使用全局日志记录器（此处尚未加载模型，仅记录配置的权重路径）
+        SYSTEM_LOGGER.info(f"VideoThread | 视频：{self.source} | 配置权重：{self.model_name}")
         
         self._running = True
         self._frame_count = 0
@@ -734,11 +734,15 @@ class VideoThread(QtCore.QThread):
             try:
                 model = ultralytics.YOLO(_int8_dir, task="detect")
                 self.model_signal.emit(os.path.basename(_int8_dir))
+                # 打包应用以 --windowed 运行，print 不可见，实际生效的模型必须进日志
+                SYSTEM_LOGGER.info(f"实际加载模型：{os.path.basename(_int8_dir)}（OpenVINO INT8）")
             except Exception as _int8_err:
                 print(f"INT8 模型加载失败，回退 FP32：{_int8_err}")
+                SYSTEM_LOGGER.warning(f"INT8 模型加载失败，回退 FP32：{_int8_err}")
                 self.model_signal.emit(os.path.basename(self.model_path))
         else:
             self.model_signal.emit(os.path.basename(self.model_path))
+            SYSTEM_LOGGER.info(f"实际加载模型：{os.path.basename(self.model_path)}（未找到 INT8 模型目录）")
 
         name_map = model.names if isinstance(model.names, dict) else {i: n for i, n in enumerate(model.names)}
         fps_value = self.fps
@@ -805,9 +809,15 @@ class VideoThread(QtCore.QThread):
             # 保留原始帧用于 UI 渲染（避免过度增强）
             frame_raw = frame.copy()
             # 帧序号提前更新，保证预处理/推理使用一致的 _frame_count
-            current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-            if current_frame_idx < 0:
-                current_frame_idx = self._frame_count
+            if isinstance(self.source, int):
+                # 摄像头不提供帧号（POS_FRAMES 恒为 -1、FPS 恒为 0），必须自行递增。
+                # 若沿用下方逻辑，_frame_count 会永久停在 0，所有基于 %N 的节流
+                # （分块推理、分块预处理、轨迹清理）都会退化为每帧执行。
+                current_frame_idx = self._frame_count + 1
+            else:
+                current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                if current_frame_idx < 0:
+                    current_frame_idx = self._frame_count
             self._frame_count = current_frame_idx
 
 

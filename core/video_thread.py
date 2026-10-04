@@ -579,9 +579,15 @@ class VideoThread(QtCore.QThread):
             else:
                 self.stereo_mode = False
                 self.disparity_map = None
-            current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-            if current_frame_idx < 0:
-                current_frame_idx = self._frame_count
+            if isinstance(self.source, int):
+                # 摄像头不提供帧号（POS_FRAMES 恒为 -1、FPS 恒为 0），必须自行递增。
+                # 若沿用下方逻辑，_frame_count 会永久停在 0，所有基于 %N 的节流
+                # （分块推理、分块预处理、轨迹清理）都会退化为每帧执行。
+                current_frame_idx = self._frame_count + 1
+            else:
+                current_frame_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+                if current_frame_idx < 0:
+                    current_frame_idx = self._frame_count
             self._frame_count = current_frame_idx
 
             if self._seeking:
