@@ -327,7 +327,7 @@ setup_build_env.bat
 build_windows.bat
 ```
 
-产物为 `dist\FastGuard\FastGuard.exe`，需连同整个 `dist\FastGuard` 目录一起分发。
+产物为 `dist\FastGuard\FastGuard.exe`，需连同整个 `dist\FastGuard` 目录一起分发（要交付单文件安装包见下方「生成安装包」）。
 
 > **打包环境需安装 `openvino`**：`pip install -r requirements.txt` 会一并安装。若打包环境缺少 `openvino`，应用仍可运行但会在加载 INT8 模型失败后静默回退 FP32 `.pt`。
 
@@ -346,9 +346,33 @@ build_windows.bat
 其他注意事项：
 
 - `dist/`、`build/`、`*.spec` 已在 `.gitignore` 中，不要把 `dist\FastGuard` 重新压缩后提交到仓库。
-- 如需自行压缩分发，请压缩整个 `dist\FastGuard` 目录；其中大部分是已压缩的 DLL，Zip 通常只能再缩小约三成。
+- 如需自行压缩分发，请压缩整个 `dist\FastGuard` 目录；其中大部分是已压缩的 DLL，Zip 通常只能再缩小约三成。要更小的交付物请直接用 `build_installer.bat`（LZMA2 固实压缩可压到约 212 MB）。
 - 若确实需要 CUDA 推理，用带 CUDA 版 PyTorch 的环境打包即可：`set FASTGUARD_BUILD_PYTHON=D:\path\to\python.exe` 后再运行 `build_windows.bat`，产物会增大约 3.5 GB。
 - `requirements.txt` 中的 `lap` 是 ByteTrack 匹配的必需依赖，打包后位于 `dist\FastGuard\lap\`。
+
+#### 生成安装包（单文件 .exe）
+
+PyInstaller 产出的是**目录**（`dist\FastGuard\`，约 4000 个文件），不是安装包。要交付一个可双击安装的单文件 `.exe`，用 [installer/FastGuard.iss](installer/FastGuard.iss)（Inno Setup 6 脚本）再包一层：
+
+```bash
+build_windows.bat        # 先产出 dist\FastGuard（已存在可跳过）
+build_installer.bat      # 再压成 dist\FastGuard-<版本>-Setup.exe
+```
+
+`build_installer.bat` 会检查 `dist\FastGuard\FastGuard.exe`、查找 `ISCC.exe`（找不到时自动用 winget 安装 Inno Setup 6），然后用 LZMA2 固实压缩编译，耗时通常数分钟。
+
+实测：**915 MB / 4046 个文件 的 `dist\FastGuard` → 212 MB 的单文件安装包**，安装后占用 920 MB（含卸载器）。静默安装到临时目录后与 `dist\FastGuard` 逐文件比对一致（4034 个文件，除被排除的 `logs\`、`data\fastguard.db` 与新增的 `unins000.*`），安装后启动 `FastGuard.exe` 能正常在安装目录写出 `logs\` 与重建 `data\fastguard.db`，卸载后安装目录、注册表项与快捷方式全部清除。
+
+| 行为 | 说明 |
+|------|------|
+| 安装位置 | `%LOCALAPPDATA%\Programs\FastGuard`，**按用户安装、不弹 UAC** |
+| 为什么不装 `Program Files` | 应用把 `logs\` 与 `data\fastguard.db` 写在 exe 同目录（`main.py` 取 `__file__` 所在目录，`pyi_rth_fastguard.py` 还把工作目录切到 exe 目录），非管理员对该目录无写权限，会导致启动即失败 |
+| 版本号 | 默认 `1.0.0`，用 `set FASTGUARD_VERSION=1.2.0` 后再运行，或 `ISCC /DAppVersion=1.2.0 installer\FastGuard.iss` |
+| 快捷方式 | 开始菜单固定创建，桌面可选（默认不勾选）；同时生成卸载项 |
+| 安装内容 | 整个 `dist\FastGuard`，但排除开发机残留的 `logs\`、`runs\` 与 `data\fastguard.db`（首次启动自动重建空日志库） |
+| 卸载 | 连同 `{app}\logs`、`{app}\data`、`{app}\runs` 等运行期数据一起删除 |
+| 支持平台 | 仅 64 位 Windows 10 及以上（产物含 `python310.dll` 与 OpenVINO 64 位原生绑定） |
+| 中文向导 | Inno Setup 官方不带简体中文；把 `ChineseSimplified.isl` 放进 `installer\` 即自动启用 |
 
 ### 使用流程
 

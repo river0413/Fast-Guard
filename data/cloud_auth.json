@@ -1,5 +1,5 @@
 {
-  "base_url": "http://101.35.88.149:4000",
+  "base_url": "aHR0cDovLzEwMS4zNS44OC4xNDk6NDAwMA==",
   "login_path": "/api/fastguard/auth/login",
   "register_path": "/api/fastguard/auth/register",
   "timeout": 5

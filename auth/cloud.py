@@ -5,6 +5,7 @@
 直接以本地管理员身份进入系统。
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -60,7 +61,7 @@ class CloudAuthClient:
             return
         if not isinstance(data, dict):
             return
-        self.base_url = str(data.get("base_url") or "").strip()
+        self.base_url = self._decode_base_url(str(data.get("base_url") or "").strip())
         self.login_path = str(data.get("login_path") or DEFAULT_CONFIG["login_path"])
         self.register_path = str(data.get("register_path") or DEFAULT_CONFIG["register_path"])
         try:
@@ -75,6 +76,23 @@ class CloudAuthClient:
                 json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    @staticmethod
+    def _decode_base_url(value: str) -> str:
+        """将配置中的 base_url 还原为明文 URL。
+
+        兼容两种写法：
+        - 明文 URL（含 scheme，如 http://101.35.88.149:4000）
+        - base64 编码后的 URL
+        """
+        value = str(value or "").strip()
+        if not value or "://" in value:
+            return value
+        try:
+            decoded = base64.b64decode(value).decode("utf-8", errors="replace").strip()
+        except Exception:
+            return value
+        return decoded
 
     @property
     def configured(self) -> bool:
