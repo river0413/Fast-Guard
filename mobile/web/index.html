@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>FastGuard 移动端</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- 满屏 AI 推理画面（仅此一路画面，不提供图像增强视图，也不显示刷新率） -->
+<div id="surface">
+  <img id="frame" alt="AI 推理画面" src="/stream">
+  <img id="bev" alt="IPM 俯视图" hidden>
+  <div id="placeholder">
+    <p id="placeholder-title">等待推理画面</p>
+    <p id="placeholder-hint">正在连接推理服务…</p>
+  </div>
+</div>
+
+<!-- 悬浮顶栏：左上角汉堡设置栏，右上角"卸载推理"状态徽标 -->
+<header id="topbar">
+  <button id="hamburger" type="button" aria-label="打开设置" aria-expanded="false"
+          title="设置：摄像头 / 阈值 / 推理图片大小">
+    <span></span><span></span><span></span>
+  </button>
+  <div id="badge" data-state="connecting">
+    <i class="dot"></i>
+    <b>卸载推理</b>
+    <span id="badge-state">连接中</span>
+  </div>
+</header>
+
+<div id="scrim" hidden></div>
+
+<!-- 汉堡设置栏 -->
+<aside id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <h1>设置</h1>
+    <button id="drawer-close" type="button" aria-label="收起设置栏">✕</button>
+  </div>
+
+  <div class="drawer-body">
+    <section class="card">
+      <h2>切换摄像头</h2>
+      <p class="hint">手机端：0 = 后置主摄，1 = 前置；桌面端为设备序号。切换后服务端会重新打开视频源。</p>
+      <div class="segmented" id="camera-group" role="radiogroup" aria-label="切换摄像头"></div>
+      <p class="hint" id="camera-hint">当前：后置主摄（序号 0）</p>
+    </section>
+
+    <section class="card">
+      <h2>阈值设置</h2>
+      <p class="hint">低置信度阈值用于过滤弱目标，边缘强度阈值用于抑制静态纹理误报。</p>
+
+      <div class="slider-row">
+        <div class="slider-head">
+          <label for="weak-conf">低置信度阈值</label>
+          <output id="weak-conf-value">0.38</output>
+        </div>
+        <input id="weak-conf" type="range" min="10" max="95" step="1" value="38">
+      </div>
+
+      <div class="slider-row">
+        <div class="slider-head">
+          <label for="edge-strength">边缘强度阈值</label>
+          <output id="edge-strength-value">28.0</output>
+        </div>
+        <input id="edge-strength" type="range" min="10" max="2550" step="10" value="280">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>推理图片大小</h2>
+      <p class="hint">对应 YOLO 的 imgsz：数值越小推理越快，越大对小目标越友好。</p>
+      <div class="segmented" id="size-group" role="radiogroup" aria-label="推理图片大小"></div>
+      <p class="hint" id="size-hint">当前权重支持动态尺寸，可自由选择。</p>
+    </section>
+
+    <section class="card">
+      <h2>显示</h2>
+      <p class="hint">移动端仅显示 AI 推理画面；可叠加 IPM 俯视图（BEV）作为画中画。</p>
+      <label class="switch">
+        <input id="bev-toggle" type="checkbox">
+        <span>叠加 BEV 俯视图</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>推理服务</h2>
+      <p class="hint" id="service-info">—</p>
+      <button id="reload" type="button" class="primary">重新连接画面</button>
+    </section>
+
+    <section class="card">
+      <h2>关于</h2>
+      <p class="hint">FastGuard 移动端 · Web 版（无需安装 App，浏览器直连推理服务）</p>
+      <p class="hint" id="about-opts">—</p>
+      <button id="reset" type="button" class="ghost">恢复默认值</button>
+    </section>
+  </div>
+</aside>
+
+<script src="/app.js"></script>
+</body>
+</html>

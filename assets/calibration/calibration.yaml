@@ -1,0 +1,10 @@
+# 校准集（INT8 静态量化的 calibration dataset）。
+#
+# 刻意**不写 path:** —— Ultralytics 在缺失该键时，用本 YAML 所在目录作为数据集根目录
+# （`ultralytics/data/utils.py: path = Path(extract_dir or data.get("path") or Path(yaml_file).parent)`），
+# 这样 `train/val: images` 就解析到 assets/calibration/images。
+# 之前写死的绝对路径（G:\projectsnew\...）在任何其他机器上都无效，导致 INT8 导出无法复现。
+train: images
+val: images
+names:
+  0: object

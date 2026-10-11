@@ -139,13 +139,14 @@ FastGuard 旨在构建一个 **轻量化、低成本、高度智能化** 的碰�
 ### 4. YOLO + ByteTrack 集成
 
 - **模型**：YOLO11n Nano，输入 640×640
-- **类别**：person, car, truck, bus, motorcycle, bicycle
+- **类别**：仅保留主要目标 `person`（行人）、`car`（轿车）、`truck`（卡车）、`bus`（公交车）
 - **跟踪**：ByteTrack + 卡尔曼滤波保持遮挡时 ID 连续性
 - **过滤策略**：
   - 检测线以上 (40% 高度) 目标过滤
+  - 非主要目标类别过滤
   - 宽高比异常过滤 (h/w > 3 或 w/h > 4)
   - 低置信度边缘强度辅助过滤 (conf < 0.38 需 Sobel > 28.0)
-  - NMS (IoU > 0.6 行人与两轮车去重)
+  - 目标框重叠抑制：互相重叠的框只保留面积最大的一个 (IoU ≥ 0.5 或较小框被覆盖 ≥ 80%)
   - 连续 5 帧确认才纳入风险评估
 
 ---
@@ -159,10 +160,128 @@ FastGuard 旨在构建一个 **轻量化、低成本、高度智能化** 的碰�
 | 主界面 | 左侧导航栏 + 三路视频 + 右侧指标面板 + 控制面板 |
 | 参数设置 | 低置信度阈值、边缘强度阈值，支持恢复默认 |
 | 系统日志 | 黑色瀑布流实时滚动，15条内存缓冲，文件按时间戳归档 |
+| 移动端界面 | Qt6（PySide6）手机形态界面：满屏 AI 推理画面 + 左上汉堡设置栏 + 右上"卸载推理"徽标 |
 
 **设计风格**：暗黑工业风 + 高对比度色彩，绿色(安全)/橙红(预警)/蓝色(操作)，圆角微阴影，无冗余装饰。
 
 > 演示视频：[优酷链接](https://v.youku.com/v_show/id_XNjUyMzI3NzUyMA==.html)
+
+---
+
+## 移动端界面
+
+移动端提供**两套可选方案**，可按场景选用（推理位置不同）：
+
+| 方案 | 推理位置 | 打包 | 目录 |
+|---|---|---|---|
+| Web / Qt6 客户端 | 车机 / PC（画面回传手机） | Qt6 需 Unix 主机；Web 免安装 | `mobile/` |
+| **Flutter 端上推理** | **手机本地**（不依赖网络，不上传画面） | `flutter build apk`，Windows 可直接出 arm64 包 | `mobile_flutter/` |
+
+### 方案一：Flutter 端上推理（推荐用于"手机独立可用"）
+
+```powershell
+# 1. 一键装工具链（免管理员，装在 %LOCALAPPDATA%\AndroidToolchain）
+mobile_flutter\tools\setup_android_toolchain.bat
+
+# 2. 构建 64 位（arm64-v8a）release APK
+mobile_flutter\tools\build_apk.bat
+# 产物：mobile_flutter\build\app\outputs\flutter-apk\app-release.apk
+```
+
+**本仓库已实测构建通过**：产物 `dist/FastGuard-mobile-arm64-v1.1.1.apk`，**89.9 MB**（含 FP32 10.1 MB
+与 INT8 4.1 MB 两个模型，可在界面切换），原生库只有
+**`arm64-v8a` + `x86_64`（32 位 ABI 数量 = 0）**，包名
+`com.fastguard.fastguard_mobile`，应用名「FastGuard 移动端」，必需权限只有 `CAMERA`
+（另有插件带入的存储/网络权限，实际未使用）；`flutter analyze` 无问题、
+`flutter test` 108 条单测（无需真机）全部通过。
+
+**v1.1.0/v1.1.1 新增**：俯视图按类别画矢量标识并列相对速度、俯视图**扇形/方形**一键切换、
+**两轮车大类**（自行车/摩托车）、**设置栏改为多层级**（8 个一级分组）、
+以及**远距监测**（优先后置长焦并发，机型隐藏长焦时自动回退**主摄中心裁切**，均为 2:1 配比，
+远距目标只标距离）。**已在真机（MEIZU 21 Pro）验证**：两种俯视形态渲染无异常、
+主摄裁切远距链路出结果（详见
+[mobile_flutter/README.md 第 4.4 节](mobile_flutter/README.md#44-本仓库已实测的构建与真机结果)）。
+
+**已在真机（MEIZU 21 Pro / Android 16）验证可正常运行**：横屏相机预览 + 顶栏（左上汉堡、
+右上"端上推理"徽标）正常渲染，进程持续运行无崩溃。期间定位并修复了两个"打开即闪退"的
+真实原因（插件 API 崩溃、R8 混淆裁掉 ONNX Runtime 类），详见
+[mobile_flutter/README.md 第 8 节](mobile_flutter/README.md#8-真机排错记录重要两个导致打开即闪退的真实原因)。
+
+**测距方式（本版重点）**：不猜相机安装姿态，而是读取手机**真实光学参数**后用针孔模型测距 ——
+
+```
+距离 = 真实尺寸 × 焦距(像素) / 目标像素尺寸
+```
+
+* 焦距来自 Android `CameraCharacteristics`（自定义平台通道），真机实测
+  `6.71mm → 23.8mm(35mm等效) → 焦距 475.6px @720px 宽`；
+* 真实尺寸按类别标定，且**高度与宽度两路加权融合**（像素越多权重越大）：
+  **公交车 2.5m / 卡车 3.0m / 轿车 1.75m 为高度值**，宽度另用一组参考值；
+* 横向偏移 `X = (u-cx)/f × 距离` 用于右下角**俯视图（BEV）**定位目标；
+* 尺寸表未覆盖的类别自动回退 IPM；读不到焦距时整体回退 IPM 并在界面标注。
+
+**标框平滑（本版新增）**：用**前两帧的移动趋势**把框外推到第三帧，再按强度平滑过渡
+（`输出 = 预测 + α × (本帧测量 - 预测)`，默认 α = 0.45，设置栏可调强度或关闭）：
+
+* 稳态匀速运动**不引入滞后**（单测：20 帧后与测量只差 0.04px，普通 EMA 会滞后约 12px）；
+* ±4px 抖动被压到 ±0.7px；跳变过大（换 ID/误检合并）时直接吸附而不滑行；
+* 画面标框与**俯视图**共用同一个平滑框（距离/横向偏移由它重算），两视图运动完全同步；
+* 只影响绘制：TTC 与风险分级仍用未平滑的原始测量。
+
+**模型精度（本版新增）**：界面可在 **FP32（默认）** 与 **INT8 量化**（10.1 MB → 4.1 MB）之间切换。
+量化配方有个必须知道的坑：**检测头必须保持 FP32** —— 检测头输出的是后处理前的 logits，
+校准集（仓库自带的 200 帧远景画面）量程很窄，一旦出现近处大目标就会截断到量程上限，
+表现是**所有高置信度全部塌成 0.500**（sigmoid(0)）；实测 Ultralytics 默认的 INT8 导出
+（88/88 个 Conv 全量化）在 bus.jpg 上把 0.846 的公交车与 0.811 的行人全变成 0.500，
+而量化 63/88 个 Conv（检测头排除）后与 FP32 一致到小数点后三位。
+
+但**两个平台实测 INT8 都没有更快**，且精度有损失，所以**默认关闭**：
+
+| 指标 | FP32 | INT8 |
+|---|---|---|
+| 体积 | 10.1 MB | **4.1 MB** |
+| COCO128@320 mAP50-95 / 召回 | 0.3916 / 0.5045 | 0.3627 (−7.4%) / 0.4464 (**−11.5%**) |
+| x86 延迟 @320 | **35.7 ms** | 52.8 ms |
+| **真机（MEIZU 21 Pro）延迟 @320** | **59.1 ms**（中位） | 69.5 ms（**慢 18%**） |
+
+如需自己复现/调整量化，用 `mobile_flutter\tools\export_int8_onnx.py`（导出后**强制**做
+FP32 vs INT8 一致性检验，不合格返回非 0）。详见
+[mobile_flutter/README.md 第 3 节](mobile_flutter/README.md#3-模型)。
+
+真机实测日志（MEIZU 21 Pro / Android 16）：
+
+```
+相机光学: 相机 0 · 物理焦距 6.71 mm · 传感器 9.77×7.33mm · 23.8mm(35mm等效)
+测距方式 = 针孔(真实尺寸+真实焦距)，焦距(像素) = 475.6，图像宽度 = 720
+端上推理 frame=181 input=320 detections=3 tracks=6 objects=6 risk=0 ms=167.9 平滑=1/6 最近=轿车 29.4m(横向3.0m,fused)
+端上推理 frame=241 input=320 detections=1 tracks=4 objects=4 risk=2 ms=50.1  平滑=1/4 最近=轿车 2.0m(横向-0.0m,fused)
+```
+
+（`平滑=a/b` = 本帧 b 个目标里有 a 个用上了趋势外推；FP32@320 单帧中位 **59.1 ms**，累计 4300+ 帧无崩溃。）
+
+详见 [mobile_flutter/README.md 第 5 节](mobile_flutter/README.md#5-测距原理真实焦距--真实尺寸)。
+
+装到手机（`adb` 已随工具链装好，见 [mobile_flutter/README.md](mobile_flutter/README.md#43-adb-说明已随工具链装好无需另装)）：
+
+```powershell
+mobile_flutter\tools\install_apk.bat      # 一键安装（含设备排错指引）
+# 或： adb install -r dist\FastGuard-mobile-arm64-v1.1.1.apk
+```
+
+模型为 `assets/yolo11n.onnx`（10.1 MB，输入 `1×3×S×S` 动态，输出 `1×84×N`）与可选的
+`assets/yolo11n_int8.onnx`（4.1 MB，INT8 量化，检测头保持 FP32），
+用 ONNX Runtime 在设备上直接推理；TTC 计算与 IPM 测距均为 `core/` 下 Python 实现的 Dart 移植。
+
+### 方案二：Web / Qt6 客户端（推理留在车机）
+
+```bash
+pip install -r mobile/requirements-mobile.txt
+python -m mobile.app                       # Qt6 手机形态界面（自动拉起本地推理服务）
+python -m mobile.backend.frame_server --web-port 8080   # 手机浏览器直接打开
+python -m mobile.app --host 192.168.1.20 --port 8765 --no-backend   # 连接车机
+```
+
+详细说明见 [mobile/README.md](mobile/README.md) 与 [mobile_flutter/README.md](mobile_flutter/README.md)。
 
 ---
 

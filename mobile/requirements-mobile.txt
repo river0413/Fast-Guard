@@ -1,0 +1,11 @@
+# FastGuard 移动端界面依赖（Qt6）
+#
+# 桌面端 main.py 依赖见仓库根目录 requirements.txt（PyQt5）。
+# 移动端界面使用 Qt6 / PySide6，与服务端各自独立进程，互不冲突。
+#
+# 只装 Essentials：界面用到 QtCore / QtGui / QtWidgets / QtNetwork / QtTest，
+# 均已包含在 Essentials 中。而 PySide6 元包还会拉入 Addons / WebEngine / Pdf
+# （多出约 650 MB，实测），对移动端界面没有用途。
+PySide6-Essentials>=6.6,<7
+# 打包 Android APK 时需要（仅构建机安装）：
+#   pip install pyside6-android-deploy

@@ -1,0 +1,39 @@
+name: fastguard_mobile
+description: FastGuard 移动端（Flutter）—— 推理在手机端本地完成
+publish_to: "none"
+version: 1.1.1+6
+
+environment:
+  # 与工具链自带的 Dart 3.13.5 对齐
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 端上推理：加载 assets/yolo11n.onnx（Ultralytics 导出，输入 1x3xSxS 动态）
+  flutter_onnxruntime: ^1.9.0
+
+  # 摄像头采集（Android 端为 Camera2/CameraX 图像流）
+  camera: ^0.12.1
+
+  # 设置持久化
+  shared_preferences: ^2.3.3
+
+  # 说明：letterbox 预处理、NMS、框绘制都是自己实现的，
+  # 因此不需要 image 包；path_provider 由 flutter_onnxruntime 自行声明。
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    # YOLO11n ONNX（10.1 MB，输入 1x3xSxS 动态，输出 1x84xN）
+    - assets/yolo11n.onnx
+    # INT8 量化版（4.1 MB，QDQ；检测头保持 FP32，配方见 tools/export_int8_onnx.py）
+    - assets/yolo11n_int8.onnx
+
+# Android 构建相关：只出 64 位 ABI（arm64-v8a），见 tools/build_apk.bat

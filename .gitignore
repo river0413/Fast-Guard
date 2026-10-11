@@ -53,11 +53,30 @@ cloud_backend/*.db
 *.db-shm
 *.db-wal
 
+# 本地运行日志数据库（仓库中已有的跟踪文件仍需单独取消跟踪）
+data/fastguard.db
+
 # CPU inference benchmark results
 benchmark_results/
 
 # INT8 量化校准数据集（导出用一次性数据，不提交/打包）
-assets/calibration/
+# 注意：必须用 `dir/*` 而不是 `dir/`，否则无法用 `!` 重新包含单个文件
+# （gitignore 规定"父目录被排除时，其中的文件无法再被重新包含"）
+assets/calibration/*
+# 数据集描述文件要提交：它定义 train/val 指向 images/，且刻意不写死绝对路径，
+# 是复现 INT8 导出的必要信息（见 mobile_flutter/README.md 3.2 节）
+!assets/calibration/calibration.yaml
 
 # INT8 导出尺寸扫描产物（临时，用于精度-速度对比）
 assets/weights/_int8_sweep/
+
+# 移动端界面本地配置（含本机 IP / 端口）
+mobile/mobile_settings.json
+
+
+# Flutter 端上推理移动端（mobile_flutter/）
+# mobile_flutter/.gitignore 与 android/.gitignore 由 flutter create 生成，已覆盖
+# build/、.dart_tool/、.gradle/、local.properties、*.iml、gradle wrapper 等；
+# 这里只补充它未覆盖的 Kotlin 编译缓存。
+# 注意：pubspec.lock 对**应用**应当提交（保证构建可复现），因此不忽略。
+mobile_flutter/android/.kotlin/

@@ -1,0 +1,123 @@
+name: Build Android APK (64-bit)
+
+# 说明：pyside6-android-deploy 官方只支持 Unix 主机，因此 Windows 开发机无法直接出包。
+# 本工作流在 Linux runner 上完成构建（自动下载 NDK r28c / SDK / Android wheel）。
+# 产物：arm64-v8a（真机）或 x86_64（64 位模拟器）的 .apk（debug）或 .aab（release）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "目标 ABI（仅 64 位）"
+        required: true
+        default: aarch64
+        type: choice
+        options:
+          - aarch64
+          - x86_64
+      mode:
+        description: "debug=.apk（可直接安装）；release=.aab（上架用）"
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+      pyside_version:
+        description: "PySide6 / Qt 版本"
+        required: true
+        default: "6.12.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build APK (${{ github.event.inputs.arch || 'aarch64' }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    env:
+      PYSIDE_VERSION: ${{ github.event.inputs.pyside_version || '6.12.0' }}
+      TARGET_ARCH: ${{ github.event.inputs.arch || 'aarch64' }}
+      BUILD_MODE: ${{ github.event.inputs.mode || 'debug' }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 64 位 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: "x64"
+
+      - name: 安装系统依赖（JDK 17 / buildozer / python-for-android 所需工具链）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            openjdk-17-jdk \
+            autoconf automake libtool pkg-config \
+            zip unzip git ccache cmake \
+            zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libffi-dev libssl-dev
+          java -version
+
+      - name: 安装 PySide6 与 Android 打包工具
+        run: |
+          python -m pip install --upgrade pip
+          # 在 Unix 上安装 PySide6 会同时提供 pyside6-android-deploy 命令
+          python -m pip install "PySide6==${PYSIDE_VERSION}"
+          python -m pip install "buildozer==1.6.0" "cython==0.29.33" pyyaml
+          which pyside6-android-deploy
+
+      - name: 下载 Android NDK r28c 与 SDK（Qt 官方脚本）
+        run: |
+          git clone --depth 1 https://code.qt.io/pyside/pyside-setup.git /tmp/pyside-setup
+          python /tmp/pyside-setup/tools/cross_compile_android/main.py \
+            --download-only --skip-update --auto-accept-license
+          ls -la "${HOME}/.pyside6-android-deploy" || true
+
+      - name: 列出可用的 64 位 Android wheel
+        run: python -m mobile.packaging.android_deploy --list --arch "${TARGET_ARCH}"
+
+      - name: 校验打包配置（staging / wheel / spec）
+        run: |
+          python -m mobile.packaging.android_deploy \
+            --arch "${TARGET_ARCH}" --mode "${BUILD_MODE}" --check
+
+      - name: 构建 APK
+        run: |
+          python -m mobile.packaging.android_deploy \
+            --arch "${TARGET_ARCH}" --mode "${BUILD_MODE}" --title FastGuard
+
+      - name: 收集产物
+        if: always()
+        run: |
+          mkdir -p artifacts
+          find . -path ./artifacts -prune -o \( -name "*.apk" -o -name "*.aab" \) -print \
+            -exec cp {} artifacts/ \;
+          ls -la artifacts
+
+      - name: 上传 APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastguard-android-${{ env.TARGET_ARCH }}-${{ env.BUILD_MODE }}
+          path: artifacts/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 上传构建配置与日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastguard-android-config-${{ env.TARGET_ARCH }}
+          path: |
+            build/android/project/pysidedeploy.spec
+            build/android/project/buildozer.spec
+          if-no-files-found: ignore
+          retention-days: 7
