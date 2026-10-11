@@ -63,7 +63,7 @@ flowchart TB
 - 单目分支将画面分为有重叠区域的上下图块处理，复用增强/检测结果以减少计算；预处理包含灰度、CLAHE、中值滤波和 Sobel 边缘强度等步骤，具体处理会按帧调度。
 - SBS 双目分支按宽高比识别左右图，计算 StereoSGBM 视差，并使用 `model.track(..., tracker="bytetrack.yaml")`。
 - 默认分支使用 Ultralytics YOLO 权重（仓库包含 `assets/weights/yolo11n.pt`）进行目标检测；代码中实际推理设备目前指定为 CPU。
-- 检测框经类别/位置/置信度过滤和重叠区域 NMS 后送入 `TWSManager`，获得稳定 ID、轨迹状态和短时外推结果。单目分支调用 `model.predict()`，因此不能笼统描述为每帧都使用 ByteTrack；ByteTrack 配置出现在 SBS 分支。
+- 检测框经类别/位置/置信度过滤和重叠框抑制（仅保留主要目标类别 `person` / `car` / `truck` / `bus`；互相重叠的框只保留面积最大的一个）后送入 `TWSManager`，获得稳定 ID、轨迹状态和短时外推结果。单目分支调用 `model.predict()`，因此不能笼统描述为每帧都使用 ByteTrack；ByteTrack 配置出现在 SBS 分支。
 
 ### 3.2 视角判断
 
@@ -105,11 +105,61 @@ IPM 采用针孔相机参数和相机安装高度、俯仰角、偏航角将像�
 | `auth/cloud.py`, `auth/ui.py` | 桌面端云端账户 API 客户端和登录界面 |
 | `auth/db.py` | 桌面端 SQLite 事件日志；不保存云端用户账户 |
 | `cloud_backend/app.py`, `cloud_backend/db.py` | 独立 Flask 账户 API 与 SQLite 用户存储 |
+| `mobile/` | 可选移动端界面（Qt6 / PySide6）：只显示 AI 推理画面与下发参数，不含推理 |
+| `mobile/backend/frame_server.py` | 移动端推理服务：包装既有 `VideoThread`，把 `frame_signal` 中的推理画面编成 JPEG 并经 TCP 推送 |
+| `mobile/packaging/` | 64 位 Android APK 打包（staging + Android wheel 解析 + `pysidedeploy.spec`） |
+| `mobile_flutter/` | 可选移动端（Flutter + ONNX Runtime）：**推理在手机本地完成**，TTC/IPM 由 `core/` 移植为 Dart |
+| `assets/weights/yolo11n.onnx` | 端上推理用模型（由 `yolo11n.pt` 导出，`1×3×S×S` 动态输入） |
+| `mobile/protocol.py` | 移动端 ↔ 推理服务的二进制分帧协议（两端共用，无 Qt 依赖） |
 | `assets/weights/`, `bytetrack.yaml` | 检测权重和跟踪器配置 |
 
 本地事件日志默认保存在 `data/fastguard.db`；运行/视角诊断文本日志保存在 `logs/`。账户服务用户库默认位于 `cloud_backend/cloud_users.db`（可由环境变量覆盖），与桌面端日志库分离。桌面端云端地址和 API 路径由 `data/cloud_auth.json` 配置。
 
-## 5. 相关论文与实现对应关系
+## 5. 移动端界面（可选客户端，Qt6）
+
+`mobile/` 是**可选**的手机形态客户端，不参与默认桌面端启动流程，也不改变既有推理与云端架构：
+
+```mermaid
+flowchart LR
+    Engine[core/video_thread.py · VideoThread] -->|frame_signal 原始/预处理/推理/BEV| Bridge[mobile/backend/engine_bridge.py]
+    Bridge -->|仅推理画面 + 精简状态| Hub[mobile/backend/frame_hub.py]
+    Hub -->|JPEG + JSON| Server[mobile/backend/frame_server.py]
+    Server -->|TCP 127.0.0.1 / 局域网| Client[mobile/client/transport.py]
+    Client --> UI[mobile/ui 满屏推理画面 + 汉堡设置栏 + 卸载推理徽标]
+    UI -->|set_source / set_thresholds / set_inference_size / set_bev| Server
+```
+
+- 推理继续在 `VideoThread` 内完成（桌面端路径与算法不变）；移动端只做显示与参数下发。
+- `engine_bridge` 会主动丢弃 `frame_signal` 的第二个参数（预处理画面），移动端界面不显示帧率。
+- 为支持"推理图片大小设置"，`core/video_thread.py` 增加了**向后兼容**的可选参数
+  `inference_size`（默认 `320`，与原硬编码值相同）及运行时接口 `set_inference_size()`；
+  桌面端 `main.py` 中的同名副本未改动。
+- 具体协议、参数与 64 位 Android 打包方式见 [mobile/README.md](mobile/README.md)。
+
+### 5.1 移动端打包（64 位 APK）
+
+移动端有两种可选形态：
+
+| 形态 | 推理位置 | 打包方式 | Windows 能否直接出包 |
+|---|---|---|---|
+| `mobile/`（PyQt5 服务端 + Qt6 客户端） | 车机 / PC | `pyside6-android-deploy` | ❌ 官方仅支持 Unix 主机 |
+| `mobile_flutter/`（Flutter 端上推理） | **手机本地** | `flutter build apk` | ✅ 可以（arm64 原生支持） |
+
+**端上推理路线（推荐）**：`mobile_flutter/` 用 ONNX Runtime 在手机上直接跑
+`yolo11n.onnx`（导出规格 `1×3×S×S` → `1×84×N`，动态输入；另有 INT8 量化版可切换，
+10.1 MB → 4.1 MB，配方要求检测头保持 FP32，见 mobile_flutter 第 3 节），
+TTC 与 IPM 逻辑由
+`core/calculator.py`、`core/ipm.py` 移植为 Dart；测距改为"真实尺寸 + 手机真实焦距"的针孔模型，
+并用 `lib/core/box_smoother.dart` 的 α-β 滤波按前两帧运动趋势平滑标框（画面标框与俯视图
+共用同一份平滑几何）。工具链（Flutter SDK / JDK 17 /
+Android SDK）由 `mobile_flutter/tools/setup_android_toolchain.bat` 免管理员安装到
+`%LOCALAPPDATA%`，不污染仓库。
+
+**客户端路线**：`mobile/packaging/` 负责生成精简 staging 工程、从 Qt 官方下载站解析
+64 位 Android wheel、并生成/校验 `pysidedeploy.spec`；32 位 ABI 会被拒绝。因官方工具
+限制，需在 Linux runner（`.github/workflows/build-android-apk.yml`）上构建。
+
+## 6. 相关论文与实现对应关系
 
 以下论文用于解释项目采用或参考的技术，不表示论文方法已被完整复现，也不构成系统安全性或道路适用性的验证。
 
@@ -126,7 +176,7 @@ IPM 采用针孔相机参数和相机安装高度、俯仰角、偏航角将像�
 
 项目包含 Ultralytics YOLO11n 权重并通过 Ultralytics API 加载。Ultralytics 未为 YOLO11 发布正式学术论文，因此应引用其[官方 YOLO11 文档](https://docs.ultralytics.com/models/yolo11/)和[代码仓库](https://github.com/ultralytics/ultralytics)，而不要将第三方综述误写成官方 YOLO11 论文。
 
-## 6. 当前实现边界
+## 7. 当前实现边界
 
 - 系统输出是基于单目图像/可选 SBS 视差、默认标定参数和启发式阈值的风险提示；不是经过功能安全认证的 ADAS，也不能替代驾驶员观察或车规传感器。
 - 车辆速度默认值为模拟值；IPM 距离受到相机参数及地面条件影响。

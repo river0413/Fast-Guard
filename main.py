@@ -63,6 +63,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont   # 新增：PIL 中文支持
 
+#: 只保留的主要目标类别（行人 / 轿车 / 卡车 / 公交车），其余检测结果一律过滤
+MAIN_TARGET_CLASSES = ("person", "car", "truck", "bus")
+
+#: 目标框重叠抑制阈值：交并比达到该值即视为同一目标，仅保留面积最大的框
+OVERLAP_IOU_THRESHOLD = 0.5
+#: 较小框被较大框覆盖的面积比例达到该值（近乎完全嵌套）时，同样仅保留较大框
+OVERLAP_COVER_THRESHOLD = 0.8
+
+
 def print_versions():
     print(f"Python 版本: {sys.version}")
     print(f"ultralytics 版本: {ultralytics.__version__}")
@@ -298,88 +307,12 @@ class VideoThread(QtCore.QThread):
             print(f"Font preload failed: {e}")
         # --------------------------------------
 
-        # Class Name Translation Map
+        # Class Name Translation Map（只保留主要目标类别）
         self.class_map = {
             "person": "行人",
-            "bicycle": "自行车",
             "car": "轿车",
-            "motorcycle": "摩托车",
-            "airplane": "飞机",
-            "bus": "公交车",
-            "train": "火车",
             "truck": "卡车",
-            "boat": "船",
-            "traffic light": "红绿灯",
-            "fire hydrant": "消防栓",
-            "stop sign": "停止标志",
-            "parking meter": "停车计费器",
-            "bench": "长椅",
-            "bird": "鸟",
-            "cat": "猫",
-            "dog": "狗",
-            "horse": "马",
-            "sheep": "羊",
-            "cow": "牛",
-            "elephant": "大象",
-            "bear": "熊",
-            "zebra": "斑马",
-            "giraffe": "长颈鹿",
-            "backpack": "背包",
-            "umbrella": "雨伞",
-            "handbag": "手提包",
-            "tie": "领带",
-            "suitcase": "手提箱",
-            "frisbee": "飞盘",
-            "skis": "滑雪板",
-            "snowboard": "单板滑雪",
-            "sports ball": "运动球",
-            "kite": "风筝",
-            "baseball bat": "棒球棒",
-            "baseball glove": "棒球手套",
-            "skateboard": "滑板",
-            "surfboard": "冲浪板",
-            "tennis racket": "网球拍",
-            "bottle": "瓶子",
-            "wine glass": "酒杯",
-            "cup": "杯子",
-            "fork": "叉子",
-            "knife": "刀",
-            "spoon": "勺子",
-            "bowl": "碗",
-            "banana": "香蕉",
-            "apple": "苹果",
-            "sandwich": "三明治",
-            "orange": "橙子",
-            "broccoli": "西兰花",
-            "carrot": "胡萝卜",
-            "hot dog": "热狗",
-            "pizza": "披萨",
-            "donut": "甜甜圈",
-            "cake": "蛋糕",
-            "chair": "椅子",
-            "couch": "沙发",
-            "potted plant": "盆栽",
-            "bed": "床",
-            "dining table": "餐桌",
-            "toilet": "厕所",
-            "tv": "电视",
-            "laptop": "笔记本电脑",
-            "mouse": "鼠标",
-            "remote": "遥控器",
-            "keyboard": "键盘",
-            "cell phone": "手机",
-            "microwave": "微波炉",
-            "oven": "烤箱",
-            "toaster": "烤面包机",
-            "sink": "水槽",
-            "refrigerator": "冰箱",
-            "book": "书",
-            "clock": "钟",
-            "vase": "花瓶",
-            "scissors": "剪刀",
-            "teddy bear": "泰迪熊",
-            "hair drier": "吹风机",
-            "toothbrush": "牙刷"
+            "bus": "公交车",
         }
 
 
@@ -631,6 +564,10 @@ class VideoThread(QtCore.QThread):
             cy = int((y1 + y2) / 2)
             class_name = name_map.get(cls_id, "")
 
+            # 只保留主要目标（行人 / 轿车 / 卡车 / 公交车）
+            if class_name not in MAIN_TARGET_CLASSES:
+                continue
+
             # Sobel 边缘强度辅助过滤：降低低置信度静态纹理误报
             edge_strength = 0.0
             if sobel_block is not None:
@@ -687,6 +624,38 @@ class VideoThread(QtCore.QThread):
         inter = (ix2 - ix1) * (iy2 - iy1)
         union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
         return inter / max(union, 1e-6)
+
+    @staticmethod
+    def _suppress_overlapping_boxes(boxes):
+        """重叠目标框抑制：互相重叠时只保留面积最大的框。
+
+        boxes: [(x1, y1, x2, y2), ...]
+        返回同长度的 bool 列表，True 表示该框保留。按面积从大到小遍历，
+        因此重叠组内面积最大的框始终保留（用于 YOLO 标图时去掉重复框）。
+        """
+        keep = [True] * len(boxes)
+        if len(boxes) <= 1:
+            return keep
+        areas = [max(0, b[2] - b[0]) * max(0, b[3] - b[1]) for b in boxes]
+        order = sorted(range(len(boxes)), key=lambda i: areas[i], reverse=True)
+        for oi, i in enumerate(order):
+            if not keep[i]:
+                continue
+            ax1, ay1, ax2, ay2 = boxes[i]
+            for j in order[oi + 1:]:
+                if not keep[j]:
+                    continue
+                bx1, by1, bx2, by2 = boxes[j]
+                ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+                ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+                inter = (ix2 - ix1) * (iy2 - iy1)
+                iou = inter / max(areas[i] + areas[j] - inter, 1e-6)
+                cover = inter / max(min(areas[i], areas[j]), 1e-6)
+                if iou >= OVERLAP_IOU_THRESHOLD or cover >= OVERLAP_COVER_THRESHOLD:
+                    keep[j] = False
+        return keep
 
     # --- 核心主循环 ---
     def run(self):
@@ -975,8 +944,6 @@ class VideoThread(QtCore.QThread):
                 results = None  # 非 SBS 路径不再使用 results
 
             infos = []
-            persons = []
-            bikes = []
             dx_list = []
             dy_list = []
             bev_data = [] # 记录投影点
@@ -998,43 +965,15 @@ class VideoThread(QtCore.QThread):
             for o in tws_out:
                 record = (o.stable_id, o.x1, o.y1, o.x2, o.y2, o.cx, o.cy, o.class_name)
                 infos.append(record)
-                if o.class_name in {"bicycle", "motorcycle"}:
-                    bikes.append(record)
-                if o.class_name == "person":
-                    persons.append(record)
 
                 if not o.is_coasting and o.stable_id in self._last_centers:
                     px, py = self._last_centers[o.stable_id]
                     dx_list.append(o.cx - px)
                     dy_list.append(o.cy - py)
 
-            def iou(a, b):
-                ax1, ay1, ax2, ay2 = a[1], a[2], a[3], a[4]
-                bx1, by1, bx2, by2 = b[1], b[2], b[3], b[4]
-                inter_x1 = max(ax1, bx1)
-                inter_y1 = max(ay1, by1)
-                inter_x2 = min(ax2, bx2)
-                inter_y2 = min(ay2, by2)
-                if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-                    return 0.0
-                inter = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-                area_a = (ax2 - ax1) * (ay2 - ay1)
-                area_b = (bx2 - bx1) * (by2 - by1)
-                return inter / max(area_a + area_b - inter, 1e-6)
-
-            filtered_infos = []
-            for rec in infos:
-                if rec[7] == "person":
-                    keep = True
-                    for bike in bikes:
-                        if iou(rec, bike) > 0.6:
-                            keep = False
-                            break
-                    if not keep:
-                        continue
-                filtered_infos.append(rec)
-
-            infos = filtered_infos
+            # 多个目标框重叠时只保留面积最大的框（避免重复框同时标图）
+            _keep = self._suppress_overlapping_boxes([(r[1], r[2], r[3], r[4]) for r in infos])
+            infos = [rec for rec, keep in zip(infos, _keep) if keep]
 
             for track_id, x1, y1, x2, y2, cx, cy, _ in infos:
                 self._last_centers[track_id] = (cx, cy)

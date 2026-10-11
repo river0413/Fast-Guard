@@ -1,0 +1,2 @@
+# 让 git 强制保持 LF：在 Windows 上编辑后仍可直接在 Linux / WSL 中执行
+mobile/build_android_apk.sh text eol=lf
